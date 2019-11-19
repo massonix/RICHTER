@@ -1,0 +1,204 @@
+---
+title: "CLL ICGC_019"
+author: "Ramon Massoni-Badosa"
+date: "11/19/2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Objective
+The purpose of this notebook is to unravel the evolution of intratumoral heterogeneity in patient 019 across its CLL clinical course.
+
+# Pre-processing
+
+## Load packages
+
+```{r}
+library(Seurat)
+library(kBET)
+library(cluster)
+library(tidyverse)
+```
+
+## Load data
+We will load the demultiplexed, filtered and normalized Seurat object and subset it to our patient of interest (019):
+
+```{r}
+richter <- readRDS("results/R_objects/richter_seurat_filtered_normalized.rds")
+richter <- subset(richter, subset = patient_id == "ICGC_019")
+```
+
+## Source script with function definitions
+
+```{r}
+source("bin/utils.R")
+```
+
+# Non-linear dimensionality reduction (tSNE/UMAP)
+To reduce the redundancy and noise of this dataset, we will perform feature extraction by detecting the most variable genes in the matrix (HVG). Then, we will reduce the dimensionality even more with Principal Component Analysis (PCA). Finally, we will use the most significant principal components (PCs) to embed cells in UMAP and tSNE space to visualize the heterogeneity:
+
+```{r}
+richter <- richter %>% 
+  FindVariableFeatures() %>% 
+  ScaleData() %>% 
+  RunPCA() %>% 
+  RunTSNE(dims = 1:20) %>%
+  RunUMAP(reduction = "pca", dims = 1:20)
+levels_status <- c(
+  "diagnosis_sp", 
+  "relapse1_post-chlorambucil", 
+  "relapse2_post-R-chlorambucil", 
+  "relapse3_post-duve", 
+  "richter_while-ibrutinib"
+)
+richter$status <- factor(richter$status, levels = levels_status)
+Idents(richter) <- "status"
+palette <- c("#999999", "#92e8df", "#632c63", "#e4624e", "#c0e212")
+umap_status <- DimPlot(richter, reduction = "umap", cols = palette)
+tsne_status <- DimPlot(richter, reduction = "tsne", cols = palette)
+umap_status
+tsne_status
+```
+
+# Clustering
+
+```{r}
+richter <- FindNeighbors(richter)
+resolutions <- c(
+  0.005,
+  seq(0.01, 0.1, by = 0.01),
+  seq(0.1, 1, by = 0.1), seq(1, 10, by = 1)
+)
+avgs_sil_width_df <- data.frame(num_k = c(), sil_width = c(), resolution = c())
+num_k <- 1
+for (res in resolutions) {
+  print(str_c("Current resolution is ", res))
+  richter <-  FindClusters(richter, resolution = res, verbose = FALSE)
+  curr_num_k <- length(levels(richter$seurat_clusters))
+  if (curr_num_k == num_k) {
+    next
+  } else {
+    sil_width <- calc_sil_width(
+      object = richter, 
+      clusters = richter$seurat_clusters, 
+      npcs = 5, 
+      ncell = 2500
+    )
+    print(str_c("Current silhouette width is ", sil_width))
+    curr_df <- data.frame(num_k = curr_num_k, sil_width = sil_width, resolution = res)
+    avgs_sil_width_df <- rbind(avgs_sil_width_df, curr_df)
+    num_k <- curr_num_k 
+    print(str_c("Current number of clusters is ", num_k))
+  }
+}
+ggplot(avgs_sil_width_df, aes(num_k, sil_width, label = num_k)) +
+  geom_text() +    
+  labs(x = "Number of clusters (k)", y = "Average Silhouette Width") +
+  theme_classic() +
+  theme(plot.title = element_text(hjust = 0.5))
+
+optimal_k <- 8
+opt_resolution <- avgs_sil_width_df[avgs_sil_width_df$num_k == optimal_k, "resolution"]
+richter <- FindClusters(object = richter, resolution = opt_resolution)
+DimPlot(richter, reduction = "umap")
+```
+
+# Markers
+
+```{r}
+markers <- FindAllMarkers(richter, test.use = "wilcox")
+iterable <- 0:(length(levels(richter$seurat_clusters)) - 1)
+purrr::map(iterable, ~ head(markers[markers$cluster == .x, ], 10))
+genes <- c("CXCR4", "CD74", "FKBP5", "CCL5", "LTB", "CD27", "HLA-DPB1", "ARHGAP24", 
+           "EEF1B2", "IL7R", "NKG7", "MT-CO3", "BIRC5", "MKI67", "HIST1H3B", "AURKB", 
+           "S100A8", "LYZ")
+DotPlot(richter, features = genes, cols = c("blue", "red"), dot.scale = 8) + 
+  RotatedAxis() +
+  theme(axis.title.x = element_blank())
+saveRDS(markers, "results/R_objects/markers_dataframe.rds")
+```
+
+# Cold shock scoring 
+
+```{r}
+richter_sub <- subset(richter, idents = c("0", "1", "2"))
+richter_sub <- richter_sub %>% 
+  FindVariableFeatures() %>% 
+  ScaleData() %>% 
+  RunPCA() %>% 
+  RunTSNE(dims = 1:20) %>%
+  RunUMAP(reduction = "pca", dims = 1:20)
+umap_clusters <- DimPlot(richter_sub, reduction = "umap", cols = palette[c(2, 4, 5)], pt.size = 1)
+Idents(richter_sub) <- "status"
+umap_timepoints <- DimPlot(richter_sub, reduction = "umap", pt.size = 1)
+bar_plot_count <- richter_sub@meta.data %>% 
+  select("seurat_clusters", "status") %>% 
+  ggplot(aes(x = status, fill = seurat_clusters)) +
+    geom_bar() +
+    labs(x = "", y = "Number of cells", fill = "cluster") +
+    scale_fill_manual(values = palette[c(2, 4, 5)]) + 
+    theme_classic() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Percentage of cells
+df <- richter_sub@meta.data %>% 
+  select("seurat_clusters", "status") %>% 
+  group_by(status, seurat_clusters) %>% 
+  summarize(n_cells = n()) %>% 
+  ungroup() %>% 
+  group_by(status) %>% 
+  mutate(total = sum(n_cells)) %>% 
+  ungroup() %>% 
+  mutate(pct_cells = n_cells / total * 100) 
+bar_plot_pct <- ggplot(df, aes(x = status, y = pct_cells, fill = seurat_clusters)) +
+  geom_col() +
+  labs(x = "", y = "Percentage of cells (%)", fill = "cluster") +
+  scale_fill_manual(values = palette[c(2, 4, 5)]) + 
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+bar_plot_pct
+ggarrange(
+  plotlist = list(umap_clusters, umap_timepoints, bar_plot_count, bar_plot_pct), 
+  nrow = 2, 
+  ncol = 2
+)
+library(org.Hs.eg.db)
+library(AnnotationDbi)
+# Target
+markers_cluster0 <- markers[markers$cluster == "0", "gene"]
+markers_cluster0 <- str_remove(markers_cluster0, pattern = "(MT-|\\.1)")
+target_entrez <- AnnotationDbi::select(org.Hs.eg.db, keys = markers_cluster0, keytype = "ALIAS", columns = "ENTREZID")
+target_entrez <- target_entrez[match(markers_cluster0, target_entrez$ALIAS), "ENTREZID"]
+target_entrez <- target_entrez[!is.na(target_entrez)]
+
+# Universe
+universe <- rownames(richter)
+universe <- str_remove(universe, pattern = "(MT-|\\.1)")
+universe_entrez <- AnnotationDbi::select(org.Hs.eg.db, keys = universe, keytype = "ALIAS", columns = "ENTREZID")
+universe_entrez <- universe_entrez[match(markers_cluster0, universe_entrez$ALIAS), "ENTREZID"]
+universe_entrez <- universe_entrez[!is.na(universe_entrez)]
+
+# GO
+params <- new("GOHyperGParams", geneIds = target_entrez, 
+              universeGeneIds = universe_entrez, annotation = "org.Hs.eg.db",
+              ontology = "BP", pvalueCutoff = 1, 
+              conditional = TRUE, testDirection = "over")
+hgOver <- hyperGTest(params)
+if (return_GOHyperGResult) {
+  hgOver
+} else {
+  hgOver_df <- summary(hgOver)
+  go_results <- hgOver_df %>% 
+    arrange(desc(OddsRatio))
+  go_results
+}
+```
+
+
+
+
+
+
