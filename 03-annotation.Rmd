@@ -1,0 +1,162 @@
+---
+title: "Annotation Richter cell types and subclones"
+author: "Ramon Massoni-Badosa"
+date: "10/6/2019"
+output: 
+  BiocStyle::html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, out.width = "100%", fig.align='center', 
+                      message=FALSE, warning = FALSE)
+options(width = 1200)
+```
+
+```{r}
+# Key parameters
+num_significant_pcs <- 14
+k_resolution <- 0.01
+```
+
+HOW MUCH VARIABILITY OF COLD-SHOCK SCORE IS EXPLAIN BY TOTAL UMI?
+
+# Introduction
+The objective of this notebook is to cluster and annotate the cell types and subclones present diferent time-points of the clinical course of the chronic lymphocytic leukemia (CLL) of 3 different patients.
+
+# Pre-processing
+
+## Package loading
+
+```{r}
+library(scater)
+library(scran)
+library(Seurat)
+library(ggpubr)
+library(DoubletFinder)
+library(kBET)
+library(cluster)
+library(tidyverse)
+```
+
+## Source script with functions
+
+```{r}
+source("bin/utils.R")
+```
+
+## Load data
+
+```{r}
+richter <- readRDS("results/R_objects/richter_seurat_filtered_normalized.rds")
+richter$barcode <- colnames(richter)
+```
+
+# Find Variable Genes
+To cluster our cells, we need to overcome 2 challenges:
+
+1. The 'curse of dimensionality': as each cell can be conceived as a vector with >10,000 genes, and as two random cells will have the very similar expression for most genes, the distance measured between any given pair of cells will be very low, thus being unreliable for proper comparisons.
+2. Computational complexity: as the data is highly dimensional, even the most greedy algorithm will take long to complete. 
+3. Most genes should not be differentially expressed between cells, so the observed differences in such genes will be due to technical issues or transient biological states, that may confound the true structure in the dataset.
+
+Thus, we aim to eliminate redundancy and denoise the dataset. To this end, we will find the subset of genes that drive most of the variability in the expression matrix (feature selection). Seurat calculates the average expression and dispersion for each gene. Then, it divides genes into bins based on its average, and for each bin computes a z-score per gene. Those genes with a z-score above a certain cutoff are categorized as highly variable. The binning step is vital, since genes with more UMI tend to have more dispersion.
+
+```{r}
+richter <- FindVariableFeatures(richter)
+num_var_genes <- length(VariableFeatures(richter))
+num_var_genes
+var_plot <- VariableFeaturePlot(richter)
+var_plot <- LabelPoints(
+  plot = var_plot, 
+  points =  head(VariableFeatures(richter), 10), 
+  repel = TRUE
+)
+var_plot
+```
+
+
+# Scale data
+An important pre-processing step in any cluster analysis is to scale the data, as otherwise variables with a higher mean will have a higher weight in the distance metric:
+
+```{r}
+richter <- ScaleData(richter)
+```
+
+# Linear dimensionality reduction (PCA)
+An additional challenge in our cluster analysis is that scRNAs-seq is very noisy (very susceptible to technical artifacts), and very sparse (contains drop-outs). Thus, differences in single genes may not be accurate to identify cell types. To that end, we can perform Principal Component Analysis, as PC can be conceived as a 'metagene' that includes information across a correlated gene set. Furthermore, we will reduce the dimensionality even more:             
+
+```{r}
+richter <- RunPCA(richter, features = VariableFeatures(richter))
+VizDimLoadings(richter, dims = 1:3, reduction = "pca")
+DimPlot(richter, reduction = "pca")
+```
+
+# Cluster cells
+To cluster cells we will used the Seurat's built-in functions `FindNeighbors` and `FindClusters`, which use the graph-based [Louvain](https://en.wikipedia.org/wiki/Louvain_modularity) algorithm. The critical parameter for these functions is the resolution, which will determine the final number of clusters.
+
+```{r}
+richter <- FindNeighbors(richter, dims = 1:20)
+richter <- FindClusters(richter, resolution = 0.02)
+```
+
+# Non-linear dimensionality reduction 
+We can visualize the former clusters with a t-Stochastic Neighbor Embedding (tSNE) and uniform manifold approximation and projection (UMAP), which allow to depict more structure in the data than PCA:
+
+```{r}
+richter <- RunTSNE(richter, reduction = "pca", dims = 1:20, check_duplicates = FALSE)
+richter <- RunUMAP(richter, reduction = "pca", dims = 1:20)
+DimPlot(richter, reduction = "tsne")
+DimPlot(richter, reduction = "umap")
+num_k <- length(levels(richter$seurat_clusters))
+num_k
+```
+
+
+```{r}
+Idents(richter$hash.ID) <- "donor"
+DimPlot(richter, reduction = "umap")
+```
+
+# Find cluster markers
+Let us find the markers for each of the clusters. That is, the genes that are exclusively expressed in one cluster:
+
+```{r}
+Idents(richter) <- "seurat_clusters"
+markers <- FindAllMarkers(richter, features = VariableFeatures(richter))
+marker_selection <- unlist(map(0:(num_k-1), ~markers[markers$cluster == ., "gene"][0:5]))
+marker_selection
+DoHeatmap(richter, features = marker_selection) + NoLegend()
+```
+
+
+# Score cold-shock signature
+
+```{r}
+cold_shock_signature <- readRDS("../JULIA/current/2-CLL/results/R_objects/cold_shock_signature.rds")
+richter <- AddModuleScore(richter, features = list(cold_shock_signature), name = "cold_shock_score")
+umap_cold <- FeaturePlot(richter, features = "cold_shock_score1", reduction = "umap")
+umap_cold
+
+# Cold-shock score distribution per patient and cluster
+Idents(richter) <- "hash.ID"
+VlnPlot(object = richter, features = "cold_shock_score1", group.by = "hash.ID", pt.size = 0, sort = TRUE)
+richter@meta.data %>% 
+  select("cold_shock_score1", "hash.ID") %>% 
+  ggplot(aes(fct_reorder(hash.ID, cold_shock_score1), cold_shock_score1, 
+             fill = fct_reorder(hash.ID, cold_shock_score1))) +
+    geom_boxplot() +
+    labs(x = "", y = "cold-shock score") +
+    theme_classic() +
+    scale_fill_manual(values = rev(viridis(13))) +
+    theme(axis.text.x = element_text(angle = 90),
+          legend.position = "none")
+
+```
+
+
+
+
+
+
