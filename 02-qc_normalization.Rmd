@@ -1,0 +1,330 @@
+---
+title: "QC & normalisation - Richter"
+author: "Ramon Massoni-Badosa"
+date: "10/6/2019"
+output: 
+  BiocStyle::html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, out.width = "100%", fig.align='center', 
+                      message=FALSE, warning = FALSE)
+options(width = 1200)
+```
+
+```{r}
+### KEY PARAMETERS
+library(BiocStyle)
+
+# Cell QC
+min_total_counts <- 750
+max_total_counts <- 10000
+min_total_genes <- 200
+max_total_genes <- 3000
+max_pct_mt_expression <- 30
+
+# Gene QC
+min_total_cells <- 10
+```
+
+# Introduction
+We are investigating how intratumorigenic heterogeneity of chronic lymphocytic leukemia (CLL) evolves during its clincial course, with a particular emphasis on Richter transformation. The objective of this notebooks is to filter out poor-quality cells and genes and normalize the expression counts.   
+
+# Pre-processing
+
+## Package loading
+
+```{r}
+library(scater)
+library(scran)
+library(Seurat)
+library(ggpubr)
+library(tidyverse)
+```
+
+## Source script with functions
+
+```{r}
+source("bin/utils.R")
+```
+
+## Load data
+
+We load the demuliplexed `Seurat` object:
+
+```{r}
+richter <- readRDS("results/R_objects/richter_Seurat_demultiplexed.rds")
+
+# Define mitochondrial genes
+mt_genes <- str_detect(rownames(richter), "^MT-")
+```
+
+# Cell QC
+
+## Calculate QC metrics
+
+There are 3 essential quality control metrics that will determine if we include or exclude a cell:
+
+- Library size (total UMI): broken cells or empty droplets will have very little RNA. Likewise, doublets will have too many total UMI. We aim to discard both options.
+- Number of detected genes: highly correlated with the former. Stressed cells will have an increased dropout rate, and therefore fewer detected genes.
+- Percentage of mitochondrial expression: apoptotic or lysed cells will possess a high mitochondrial expression. That is, if the cell had shears in its membrane, the cytoplasmic RNA might leak outwards, but the mtRNA can remain trapped inside the cell.
+
+The only metric missing is the mt expression:
+
+```{r}
+richter[["percent_mt"]] <- PercentageFeatureSet(richter, pattern = "^MT-")
+```
+
+## QC metric distribution across conditions
+
+A first important realization is that different conditions can have differences in QC metric distributions. For instance, if one donor was sequenced deeper than another, then the notion of 'poor-quality cell' between both based on QC metrics will differ. If that is the case, we will need to establish different thresholds for each donor/condition. 
+
+Let us inspect such distributions:
+
+```{r}
+donor <- str_remove(colnames(richter), "ICGC_")
+donor <- str_remove(donor, "_.*")
+table(donor)
+richter$donor <- donor
+ggplot(richter@meta.data, aes(donor, log(nCount_RNA), fill = donor)) +
+  geom_boxplot() +
+  labs(y = "log (total UMI)") +
+  theme_classic() +
+  theme(legend.position = "none")
+```
+
+We can see that the donor "019" has fewer counts than the other two donors ("012" and "365"). Nevertheless, the distributions overlap and, therefore, we will not perform QC separately.
+
+## Joint distribution
+Another important exploratory analysis is the joint distribution between the 3 metrics. Specially, a high mitochondrial expression can also be present in metabolically active cells. Therefore, we need to assess how this covaries with total counts. If we find that most cells with large mitochondrial activity also have few genes/UMI, then we can be certain that they are of poor-quality:
+
+```{r}
+qc_titles <- c("Library Size (total UMI)", "Number of detected genes", "% mitochondrial expression")
+joint_qc_gg <- richter@meta.data %>% 
+  ggplot(aes(nCount_RNA, nFeature_RNA, color = percent_mt)) +
+    geom_point(alpha = 0.5) +
+    scale_color_viridis_c() +
+    labs(x = qc_titles[1], y = qc_titles[2], color = qc_titles[3]) +
+    theme_classic()
+joint_qc_gg
+```
+
+## Thresholds
+
+Now that we have a better appreciation for our data, we can proceed to decide on the thresholds for each metric. We will do so by plotting a histogram for each metric:
+
+### Library size
+
+```{r}
+qc_colnames <- c("nCount_RNA", "nFeature_RNA", "percent_mt")
+hist_counts_gg1 <- plot_histogram_seurat(  
+  richter, 
+  qc_metric = qc_colnames[1], 
+  limits = c(0, 30000),
+  title = qc_titles[1],
+  log_scale = FALSE
+)
+hist_counts_gg1
+```
+
+As there is a long tail, we need more resolution to decide on the thresholds:
+
+```{r}
+hist_counts_gg2 <- plot_histogram_seurat(  
+  richter, 
+  qc_metric = qc_colnames[1], 
+  limits = c(0, 4000),
+  title = qc_titles[1],
+  log_scale = FALSE
+)
+hist_counts_gg2
+```
+
+we see a bimodal distribution, with the first peak representing poor-quality cells. We will retain cells that have at least `r min_total_counts_1220` counts. Moreover, we require less than `r max_total_counts_1220`
+
+```{r}
+hist_counts_gg3 <- plot_histogram_seurat(  
+  richter, 
+  qc_metric = qc_colnames[1], 
+  limits = c(0, 20000),
+  title = qc_titles[1],
+  log_scale = TRUE
+)
+hist_counts_gg3 +
+  geom_vline(xintercept = min_total_counts, linetype = "dashed", color = "red") +
+  geom_vline(xintercept = max_total_counts, linetype = "dashed", color = "red") 
+```
+
+### Number of detected genes
+
+
+```{r}
+hist_n_genes_gg1 <- plot_histogram_seurat(  
+  richter, 
+  qc_metric = qc_colnames[2], 
+  limits = c(0, 4000),
+  title = qc_titles[2],
+  log_scale = FALSE
+)
+hist_n_genes_gg1
+```
+
+We see that the distribtuion is trimodal. The second and third peaks likely represent different supopulations, while the first peak are broken cells. We will threshold at a minimum of `r min_total_genes` and a maximum of `r max_total_genes`:
+
+```{r}
+hist_n_genes_gg1 +
+  geom_vline(xintercept = min_total_genes, linetype = "dashed", color = "red") +
+  geom_vline(xintercept = max_total_genes, linetype = "dashed", color = "red") 
+```
+
+### Mitochondrial expression
+
+```{r}
+mt_hist <- plot_histogram_seurat(  
+  richter, 
+  qc_metric = qc_colnames[3], 
+  limits = c(0, 100),
+  title = qc_titles[3],
+  log_scale = FALSE
+)
+mt_hist
+```
+
+We see a long tail of cells with high mitochondrial expression. As we saw that high % mt expression correlated with low number of genes, we will visually follow the normal distribution and threshold at `r max_pct_mt_expression`:
+
+```{r}
+mt_hist +
+  geom_vline(xintercept = max_pct_mt_expression, linetype = "dashed", color = "red") 
+```
+
+Overall, we will consider as poor-quality any cell that satisfies any of the following conditions:
+
+* Library size: < `r min_total_counts`, > `r max_total_counts`
+* Number of detected genes: < `r min_total_genes`, > `r max_total_genes` max_total_genes_no_1220`
+* Mitochondrial expression: < `r max_pct_mt_expression`
+
+```{r}
+is_poor_quality <- 
+  richter$nCount_RNA < min_total_counts |
+  richter$nCount_RNA > max_total_counts |
+  richter$nFeature_RNA < min_total_genes |
+  richter$nFeature_RNA > max_total_genes |
+  richter$percent_mt > max_pct_mt_expression
+table(is_poor_quality)
+```
+
+## Distribution poor-quality cells across conditions
+
+Of note, we can compare the proportion of poor quality cells across donors:
+
+```{r}
+richter$is_low_quality <- is_poor_quality
+richter@meta.data %>% 
+  group_by(donor) %>% 
+  summarise(pct_low_quality = mean(is_low_quality) * 100) %>% 
+  ggplot(aes(donor, pct_low_quality, fill = donor)) +
+    geom_col() + 
+    labs(x = "% low-quality cells") +
+    theme_classic() +
+    theme(legend.position = "none")
+```
+
+We observe that the donor 365 has an increased percentage of low-quality cells.
+
+## Cell filtering
+
+In light of the above, we will discard the following cells:
+
+```{r}
+richter <- subset(richter, subset = is_low_quality == FALSE & hash.ID != "Doublet" & hash.ID != "Negative")
+richter
+```
+
+# Gene QC
+Let us compute, for each gene, the number of cells in which we can detect at least 1 UMI:
+
+```{r}
+n_cells <- rowSums(as.matrix(richter[["RNA"]]@counts) > 0)
+gene_qc_gg <- n_cells %>% 
+  as.data.frame() %>% 
+  ggplot(aes(n_cells)) + 
+    geom_histogram(bins = 100, alpha = 0.75) +
+    scale_x_log10("Number of cells") +
+    theme_bw() 
+gene_qc_gg
+```
+
+We see two peaks, the first one of which corresponds to lowly expressed genes. As explained in [Luecken MD et al.](https://www.embopress.org/doi/pdf/10.15252/msb.20188746): "a guideline to setting this threshold is to use the minimum cell cluster size that is of interest and leaving some leeway for dropout effects". As we will not rely on clusters that have fewer than `r min_total_cells` cells, we will use it as a filter:
+
+```{r}
+gene_qc_gg +
+  geom_vline(xintercept = min_total_cells, color = "red", linetype = "dashed")
+richter_sce <- as.SingleCellExperiment(richter)
+richter_sce <- richter_sce[n_cells > min_total_cells, ]
+richter_sce
+```
+
+### Identify highly expressed genes
+As a validation, let us check whether the highest expressed genes are housekeeping genes like ACTB:
+
+```{r}
+row_data_frame <- data.frame(symbol = rownames(richter_sce))
+rownames(row_data_frame) <- rownames(richter_sce)
+rowData(richter_sce) <- row_data_frame
+richter_sce <- calculateQCMetrics(richter_sce)
+plotHighestExprs(richter_sce, feature_names_to_plot = "symbol")
+```
+
+# Normalization
+To confidently compare gene expression between cells, we need to correct for two biases:
+
+- Differences in library size: if one cell has more total counts than another due to sampling effects, genes that are equally expressed will show up as upregulated.
+- Between-sample systematic biases: if two conditions/donors were sequenced at different depths or in different batches, there might be compositional biases between conditions that yield a systematic up- or down-regulation.
+
+To correct for both, we will use the [`scran` package](https://genomebiology.biomedcentral.com/articles/10.1186/s13059-016-0947-7)  which according to both a [recent](https://www.nature.com/articles/nmeth.4292) and an [old](https://www.biorxiv.org/content/10.1101/583013v2.full) review is the most robust method for scRNA-seq data normalization:
+
+```{r}
+richter_sce <- computeSumFactors(richter_sce)
+summary(sizeFactors(richter_sce))
+assays(richter_sce)
+logcounts(richter_sce)[1:6, 1:6]
+```
+
+Let us assess if the size factors correlate with the library size:
+
+```{r}
+size_fact_df <- data.frame(
+  lib_size = richter_sce$nCount_RNA, 
+  size_fact = sizeFactors(richter_sce),
+  donor = richter_sce$donor
+)
+ggplot(size_fact_df, aes(lib_size, size_fact, color = donor)) +
+  geom_point() +
+  labs(x = "Library Size (total UMI)", y = "Scran Size Factors") +
+  theme_classic2()
+lm_size_fact <- lm(size_fact ~ lib_size, data = size_fact_df)
+summary(lm_size_fact)
+```
+
+Note: where is the call to normalize? 
+
+# Save Seurat object
+
+Finally, we can convert it back to seurat and save it as a compressed .RDS file for future analysis:
+
+```{r}
+richter <- as.Seurat(richter_sce)
+richter
+saveRDS(richter, "results/R_objects/richter_seurat_filtered_normalized.rds")
+```
+
+# Session Info
+
+```{r}
+sessionInfo()
+```
+
+
