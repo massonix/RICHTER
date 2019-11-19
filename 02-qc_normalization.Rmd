@@ -20,10 +20,10 @@ options(width = 1200)
 library(BiocStyle)
 
 # Cell QC
-min_total_counts <- 750
-max_total_counts <- 10000
+min_total_counts <- 1000
+max_total_counts <- 40000
 min_total_genes <- 200
-max_total_genes <- 3000
+max_total_genes <- 6000
 max_pct_mt_expression <- 30
 
 # Gene QC
@@ -31,7 +31,7 @@ min_total_cells <- 10
 ```
 
 # Introduction
-We are investigating how intratumorigenic heterogeneity of chronic lymphocytic leukemia (CLL) evolves during its clincial course, with a particular emphasis on Richter transformation. The objective of this notebooks is to filter out poor-quality cells and genes and normalize the expression counts.   
+We are investigating how intratumorigenic heterogeneity of chronic lymphocytic leukemia (CLL) evolves during its clincial course, with a particular emphasis on Richter transformation. The objective of this notebook is to filter out poor-quality cells and genes and normalize the expression counts.   
 
 # Pre-processing
 
@@ -62,6 +62,8 @@ richter <- readRDS("results/R_objects/richter_Seurat_demultiplexed.rds")
 mt_genes <- str_detect(rownames(richter), "^MT-")
 ```
 
+For a full description of the data please refer to the previous notebook (01-demultiplexing.Rmd).
+
 # Cell QC
 
 ## Calculate QC metrics
@@ -85,18 +87,14 @@ A first important realization is that different conditions can have differences 
 Let us inspect such distributions:
 
 ```{r}
-donor <- str_remove(colnames(richter), "ICGC_")
-donor <- str_remove(donor, "_.*")
-table(donor)
-richter$donor <- donor
-ggplot(richter@meta.data, aes(donor, log(nCount_RNA), fill = donor)) +
+ggplot(richter@meta.data, aes(patient_id, log(nCount_RNA), fill = patient_id)) +
   geom_boxplot() +
   labs(y = "log (total UMI)") +
   theme_classic() +
   theme(legend.position = "none")
 ```
 
-We can see that the donor "019" has fewer counts than the other two donors ("012" and "365"). Nevertheless, the distributions overlap and, therefore, we will not perform QC separately.
+We observe a large overlapping between donors. Thus, we will perform the QC jointly.
 
 ## Joint distribution
 Another important exploratory analysis is the joint distribution between the 3 metrics. Specially, a high mitochondrial expression can also be present in metabolically active cells. Therefore, we need to assess how this covaries with total counts. If we find that most cells with large mitochondrial activity also have few genes/UMI, then we can be certain that they are of poor-quality:
@@ -112,8 +110,9 @@ joint_qc_gg <- richter@meta.data %>%
 joint_qc_gg
 ```
 
-## Thresholds
+Indeed, we observe how cells with few UMI/genes also harbor a high mitochondrial expression.
 
+## Thresholds
 Now that we have a better appreciation for our data, we can proceed to decide on the thresholds for each metric. We will do so by plotting a histogram for each metric:
 
 ### Library size
@@ -143,13 +142,13 @@ hist_counts_gg2 <- plot_histogram_seurat(
 hist_counts_gg2
 ```
 
-we see a bimodal distribution, with the first peak representing poor-quality cells. We will retain cells that have at least `r min_total_counts_1220` counts. Moreover, we require less than `r max_total_counts_1220`
+we see a bimodal distribution, with the first peak representing poor-quality cells. We will retain cells that have at least `r min_total_counts` counts. Moreover, we require less than `r max_total_counts`:
 
 ```{r}
 hist_counts_gg3 <- plot_histogram_seurat(  
   richter, 
   qc_metric = qc_colnames[1], 
-  limits = c(0, 20000),
+  limits = c(0, 45000),
   title = qc_titles[1],
   log_scale = TRUE
 )
@@ -160,12 +159,11 @@ hist_counts_gg3 +
 
 ### Number of detected genes
 
-
 ```{r}
 hist_n_genes_gg1 <- plot_histogram_seurat(  
   richter, 
   qc_metric = qc_colnames[2], 
-  limits = c(0, 4000),
+  limits = c(0, 6500),
   title = qc_titles[2],
   log_scale = FALSE
 )
@@ -203,8 +201,8 @@ mt_hist +
 Overall, we will consider as poor-quality any cell that satisfies any of the following conditions:
 
 * Library size: < `r min_total_counts`, > `r max_total_counts`
-* Number of detected genes: < `r min_total_genes`, > `r max_total_genes` max_total_genes_no_1220`
-* Mitochondrial expression: < `r max_pct_mt_expression`
+* Number of detected genes: < `r min_total_genes`, > `r max_total_genes` 
+* Mitochondrial expression: > `r max_pct_mt_expression`
 
 ```{r}
 is_poor_quality <- 
@@ -223,11 +221,11 @@ Of note, we can compare the proportion of poor quality cells across donors:
 ```{r}
 richter$is_low_quality <- is_poor_quality
 richter@meta.data %>% 
-  group_by(donor) %>% 
+  group_by(patient_id) %>% 
   summarise(pct_low_quality = mean(is_low_quality) * 100) %>% 
-  ggplot(aes(donor, pct_low_quality, fill = donor)) +
+  ggplot(aes(patient_id, pct_low_quality, fill = patient_id)) +
     geom_col() + 
-    labs(x = "% low-quality cells") +
+    labs(x = "", y = "% low-quality cells") +
     theme_classic() +
     theme(legend.position = "none")
 ```
@@ -267,28 +265,18 @@ richter_sce <- richter_sce[n_cells > min_total_cells, ]
 richter_sce
 ```
 
-### Identify highly expressed genes
-As a validation, let us check whether the highest expressed genes are housekeeping genes like ACTB:
-
-```{r}
-row_data_frame <- data.frame(symbol = rownames(richter_sce))
-rownames(row_data_frame) <- rownames(richter_sce)
-rowData(richter_sce) <- row_data_frame
-richter_sce <- calculateQCMetrics(richter_sce)
-plotHighestExprs(richter_sce, feature_names_to_plot = "symbol")
-```
-
 # Normalization
 To confidently compare gene expression between cells, we need to correct for two biases:
 
 - Differences in library size: if one cell has more total counts than another due to sampling effects, genes that are equally expressed will show up as upregulated.
 - Between-sample systematic biases: if two conditions/donors were sequenced at different depths or in different batches, there might be compositional biases between conditions that yield a systematic up- or down-regulation.
 
-To correct for both, we will use the [`scran` package](https://genomebiology.biomedcentral.com/articles/10.1186/s13059-016-0947-7)  which according to both a [recent](https://www.nature.com/articles/nmeth.4292) and an [old](https://www.biorxiv.org/content/10.1101/583013v2.full) review is the most robust method for scRNA-seq data normalization:
+To correct for both, we will use the [`scran` package](https://genomebiology.biomedcentral.com/articles/10.1186/s13059-016-0947-7)  which according to both a [recent](https://www.nature.com/articles/s41467-019-12266-7) and an [old](https://www.nature.com/articles/nmeth.4292) review is the most robust method for scRNA-seq data normalization:
 
 ```{r}
 richter_sce <- computeSumFactors(richter_sce)
 summary(sizeFactors(richter_sce))
+richter_sce <- normalize(richter_sce)
 assays(richter_sce)
 logcounts(richter_sce)[1:6, 1:6]
 ```
@@ -299,7 +287,7 @@ Let us assess if the size factors correlate with the library size:
 size_fact_df <- data.frame(
   lib_size = richter_sce$nCount_RNA, 
   size_fact = sizeFactors(richter_sce),
-  donor = richter_sce$donor
+  donor = richter_sce$patient_id
 )
 ggplot(size_fact_df, aes(lib_size, size_fact, color = donor)) +
   geom_point() +
@@ -308,8 +296,6 @@ ggplot(size_fact_df, aes(lib_size, size_fact, color = donor)) +
 lm_size_fact <- lm(size_fact ~ lib_size, data = size_fact_df)
 summary(lm_size_fact)
 ```
-
-Note: where is the call to normalize? 
 
 # Save Seurat object
 
