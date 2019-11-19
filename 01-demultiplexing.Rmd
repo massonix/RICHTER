@@ -15,17 +15,15 @@ knitr::opts_chunk$set(echo = TRUE, out.width = "100%", fig.align='center',
 options(width = 1200)
 ```
 
-# Intoduction
+# Introduction
 
-In this project, we aim to assess the intratumoral heterogeneity within different time-points of the clinical course of [Chronic  Lymphocytic Leukemia](https://www.nature.com/articles/nrdp201696) (CLL): diagnosis, treatment and Richter syndrome.
+In this project, we aim to assess how the intratumoral heterogeneity of [Chronic  Lymphocytic Leukemia](https://www.nature.com/articles/nrdp201696) (CLL) evolves over the clinical course of the disease (diagnosis, treatment and Richter syndrome).
 
 To eliminate batch effect, detect doublets and reduce the library cost, we used the [cell hashing protocol](https://genomebiology.biomedcentral.com/articles/10.1186/s13059-018-1603-1), in which each condition (in our case time-points) is labeled with an antibody against ubiquitous cell surface markers that is crosslinked with a sample-specific hashtag oligonucleotide (HTO), that is sequenced together with the cDNA libraries. The objective of this notebook is to demultiplex the barcodes (cells) back to its original condition.
 
 ## Load packages
 
 ```{r}
-library(scater)
-library(SingleCellExperiment)
 library(Seurat)
 library(Matrix)
 library(readxl)
@@ -34,7 +32,7 @@ library(tidyverse)
 
 # Demultiplexing
 
-We have 7 libraries: "ICGC_012_01", "ICGC_012_02", "ICGC_019_01", "ICGC_019_02" , "ICGC_3299_01", "ICGC_3299_02", "ICGC_365". For each of them, we have 3 files: the expression matrix in sparse format, the list of the barcodes that identify the columns, and the list of genes that identify the rows (features). Moreover, the features file contains a column that distinguishes between genes ("Gene Expression") and HTO ("Antibody Capture"). 
+We have 7 libraries: ICGC_012_01, ICGC_012_02, ICGC_019_01, ICGC_019_02, ICGC_3299_01, ICGC_3299_02, ICGC_365. This samples were profiled with bulk genomics techniques (WGS, bulk RNA-seq, ATAC-seq, etc.) as part of the International Cancer Genome Consortium (ICGC). Specifically, we have four different CLL patients (012, 019, 3299, 365) and, for each of them, we have samples at different CLL stages (diagnosis, treatment, relapse or richter), which were multiplexed together using cell hashing. Thus, for each library we have 3 files: the expression matrix in sparse format, the list of the barcodes that identify the columns, and the list of genes that identify the rows (features). Moreover, the features file contains a column that distinguishes between genes ("Gene Expression") and HTO ("Antibody Capture"). 
 
 To demultiplex, we will follow [the pipeline from Seurat](https://satijalab.org/seurat/v3.0/hashing_vignette.html):
 
@@ -82,6 +80,32 @@ for (lib in libraries) {
 }
 ```
 
+We could successfully demultiplex all libraries except two: ICGC_3299_01 and ICGC_3299_02:
+
+```{r}
+lib <- "ICGC_3299_01"
+lib_path <- str_c("data/BCLLATLAS_10/", lib, "/filtered_feature_bc_matrix/")
+expression_matrix <- readMM(str_c(lib_path, "matrix.mtx.gz"))
+barcodes <- read_csv(str_c(lib_path, "barcodes.tsv.gz"), col_names = FALSE)
+colnames(barcodes) <- "barcode"
+features <- read_tsv(str_c(lib_path, "features.tsv.gz"), col_names = FALSE)
+colnames(features) <- c("ensembl", "symbol", "feature_type")
+rownames(expression_matrix) <- features$symbol
+colnames(expression_matrix) <- barcodes$barcode
+
+# Separate HTO and RNA matrices
+hto_ind <- which(str_detect(features$feature_type, "Antibody Capture"))
+rna_ind <- which(str_detect(features$feature_type, "Gene Expression"))
+richter_hto <- expression_matrix[hto_ind, ]
+richter_rna <- expression_matrix[rna_ind, ]
+
+# Setup Seurat object
+richter <- CreateSeuratObject(counts = richter_rna)
+richter[["HTO"]] <- CreateAssayObject(counts = richter_hto)
+richter[["HTO"]]@counts
+```
+The problem seems to be with the hashing of sample ICGC-3299-19-2768B, which contains no UMI. Hence, we will need to repeat the experiment for this particular sample. Nevertheless, we can proceed with the remaining ones.
+
 We can visualize the results as ridge plots or heatmaps:
 
 ```{r}
@@ -110,8 +134,13 @@ walk2(heatmap_l, names(heatmap_l), function(heat, lib) {
 })
 ```
 
-# Merge Seurat objects
+Based on the previous results we can conclude the following for each sample:
 
+- ICGC_012: Good ratio of singlets to doublets/negatives, which means that we can use most of the data. However, the proportion of singlets across samples is not similar. For instance, we have a lot of cells for the ICGC_012_19_1543B and very few for ICGC_012_00_30. Thus, we expect an increased number of homotypic ICGC_012_19_1543B doublets that we cannot detect with hashing; and a diminished statistical power to test effects on samples ICGC_012_00_30 and ICGC_012_05_662.
+- ICGC_019: increased proportion of negative cells, partially explained by a poor signal-to-background ratio in HTO counts, which makes it harder to assign to any condition. The distribution of singlets across samples is more homogeneous than in the previous sample.
+- ICGC_365: worst sample, almost all cells were assigned to negatives.
+
+# Merge Seurat objects
 To merge the 4 Seurat objects into one we use the [`merge` command](https://satijalab.org/seurat/v3.0/merge_vignette.html):
 
 ```{r}
@@ -158,7 +187,14 @@ As the Seurat object has two more conditions than the dataframe (Negative and Do
 ```{r}
 vec <- c("Doublet", "Negative")
 na_vec <- c(NA, NA)
-tbl <- tibble(id = vec, description = vec, Source = na_vec, "ICGC Number" = na_vec)
+tbl <- tibble(
+  id = vec, 
+  description = vec, 
+  Source = na_vec, 
+  "ICGC Number" = na_vec, 
+  "Time-post-extraction" = na_vec, 
+  comments = na_vec
+)
 condition_id <- rbind(condition_id, tbl)
 conditions <- condition_id$description
 names(conditions) <- condition_id$id
@@ -175,7 +211,7 @@ names(batch_vec) <- libraries
 richter_merged$batch <- batch_vec[richter_merged$library]
 ```
 
-Importantly, samples for every time-point of every patient where taken from a specific niche (peripheral blood or lymph node). 
+Importantly, samples for every time-point of every patient where taken from a specific niche (peripheral blood or lymph node):
 
 ```{r}
 source <- condition_id$Source
@@ -183,12 +219,20 @@ names(source) <- condition_id$id
 richter_merged$source <- source[richter_merged$hash.ID]
 ```
 
+And each blood sample is estimated to have spent some time at room temperature before cryopreservation (sampling time):
+
+```{r}
+sampling_time <- condition_id$`Time-post-extraction`
+names(sampling_time) <- condition_id$id
+richter_merged$sampling_time <- sampling_time[richter_merged$hash.ID]
+```
+
 
 # Save demultiplexed Seurat object
 Finally, we can save it as .RDS for future analysis:
 
 ```{r}
-selected <- c("nCount_RNA", "nFeature_RNA", "hash.ID", "library", "status", "patient_id", "batch", "source")
+selected <- c("nCount_RNA", "nFeature_RNA", "hash.ID", "library", "status", "patient_id", "batch", "source", "sampling_time")
 richter_merged@meta.data <- richter_merged@meta.data[, selected]
 saveRDS(richter_merged, "results/R_objects/richter_Seurat_demultiplexed.rds")
 ```
