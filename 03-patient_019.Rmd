@@ -66,6 +66,7 @@ tsne_status
 # Clustering
 
 ```{r}
+# Note: turn this into a function and add another measure of clustering accuracy.
 richter <- FindNeighbors(richter)
 resolutions <- c(
   0.005,
@@ -119,11 +120,66 @@ DotPlot(richter, features = genes, cols = c("blue", "red"), dot.scale = 8) +
   RotatedAxis() +
   theme(axis.title.x = element_blank())
 saveRDS(markers, "results/R_objects/markers_dataframe.rds")
+
+# Gene Ontolgy Enrichment analysis: Biological Process & Cellular Compartment
+iterable <- levels(markers$cluster)
+go_list <- vector(mode = "list", length = 2)
+names(go_list) <- c("BP", "CC")
+for (i in names(go_list)) {
+  markers_go <- purrr::map(iterable, function(x) {
+    genes <- markers[markers$cluster == x, "gene"]
+    max_length <- ifelse(length(genes) > 50, 50, length(genes))
+    genes <- genes[1:max_length]
+    go <- run_clusterProfiler(
+      target = genes, 
+      universe = rownames(richter), 
+      ontology = i
+    )
+    max_length2 <- ifelse(nrow(go) > 6, 6, nrow(go))
+    go[1:max_length2, ]
+  })
+  names(markers_go) <- iterable
+  markers_go <- bind_rows(markers_go, .id = "cluster")
+  go_list[[i]] <- markers_go
+}
+DT::datatable(go_list$BP)
+DT::datatable(go_list$CC)
+
+# Distribution of QC metrics per cluster
+qc_metrics <- c("nCount_RNA", "nFeature_RNA", "percent_mt" )
+qc_titles <- c(
+  "Library Size (total UMI)", 
+  "Library complexity (# detected genes", 
+  "Percentage Mitochondrial Expression (%)"
+)
+purrr::map2(qc_metrics, qc_titles, function(metric, y_title) {
+  ggplot(richter@meta.data, aes_string("seurat_clusters", metric, fill = "seurat_clusters")) +
+    geom_violin() +
+    labs(x = "Cluster", y = y_title) +
+    theme_classic() +
+    theme(legend.position = "none")
+})
+
 ```
+# Cell cycle scoring
+```{r}
+richter <- CellCycleScoring(richter, s.features = cc.genes$s.genes, g2m.features = cc.genes$g2m.genes)
+FeaturePlot(richter, reduction = "umap", features = c("S.Score", "G2M.Score"))
+```
+
 
 # Cold shock scoring 
 
 ```{r}
+cold_shock_signature <- readRDS("../../JULIA/current/2-CLL/results/R_objects/cold_shock_signature_up.rds")
+richter <- AddModuleScore(richter, features = list(cold_shock_signature), name = "cold_shock_score")
+VlnPlot(richter, features = "cold_shock_score1", group.by = "seurat_clusters")
+VlnPlot(richter, features = "cold_shock_score1", group.by = "status")
+
+
+# Note: compare with predicted time post-extraction (Marta Kullis metadata)!
+
+#########################################################
 richter_sub <- subset(richter, idents = c("0", "1", "2"))
 richter_sub <- richter_sub %>% 
   FindVariableFeatures() %>% 
@@ -165,36 +221,7 @@ ggarrange(
   nrow = 2, 
   ncol = 2
 )
-library(org.Hs.eg.db)
-library(AnnotationDbi)
-# Target
-markers_cluster0 <- markers[markers$cluster == "0", "gene"]
-markers_cluster0 <- str_remove(markers_cluster0, pattern = "(MT-|\\.1)")
-target_entrez <- AnnotationDbi::select(org.Hs.eg.db, keys = markers_cluster0, keytype = "ALIAS", columns = "ENTREZID")
-target_entrez <- target_entrez[match(markers_cluster0, target_entrez$ALIAS), "ENTREZID"]
-target_entrez <- target_entrez[!is.na(target_entrez)]
 
-# Universe
-universe <- rownames(richter)
-universe <- str_remove(universe, pattern = "(MT-|\\.1)")
-universe_entrez <- AnnotationDbi::select(org.Hs.eg.db, keys = universe, keytype = "ALIAS", columns = "ENTREZID")
-universe_entrez <- universe_entrez[match(markers_cluster0, universe_entrez$ALIAS), "ENTREZID"]
-universe_entrez <- universe_entrez[!is.na(universe_entrez)]
-
-# GO
-params <- new("GOHyperGParams", geneIds = target_entrez, 
-              universeGeneIds = universe_entrez, annotation = "org.Hs.eg.db",
-              ontology = "BP", pvalueCutoff = 1, 
-              conditional = TRUE, testDirection = "over")
-hgOver <- hyperGTest(params)
-if (return_GOHyperGResult) {
-  hgOver
-} else {
-  hgOver_df <- summary(hgOver)
-  go_results <- hgOver_df %>% 
-    arrange(desc(OddsRatio))
-  go_results
-}
 ```
 
 

@@ -692,3 +692,47 @@ calc_sil_width <- function(object, clusters, npcs, ncell) {
   summary(silhouette(as.numeric(clusters_sub), dd))$avg.width
 }
 
+run_clusterProfiler <- function(target, universe, ontology) {
+  # Runs Gene Ontology enrichment analysis using clusterProfiler.
+  # 
+  # Args:
+  #   target: character vector with the gene set of interest (HGNC symbols)
+  #   universe: character vector with all possible genes.
+  #   ontology: GO to use: Biological Process ("BP"), Cellular Compartment ("CC"),
+  #             and Molecular Function ("MP").
+  #      
+  # Returns:
+  #   A data.frame with the results of the enrichment analysis.
+  
+  # Convert to Entrez ids
+  marker0 <- markers[markers$cluster == "5" & markers$p_val_adj < 0.001, "gene"]
+  iterable <- list(target, universe)
+  iterable_entrez <- purrr::map(iterable, function(x) {
+    x <- str_remove(x, "MT-")
+    entrez <- AnnotationDbi::select(
+      org.Hs.eg.db, 
+      keys = x, 
+      keytype = "SYMBOL", 
+      columns = "ENTREZID"
+    )
+    entrez <- entrez$ENTREZID
+    entrez <- entrez[!is.na(entrez)]
+    entrez
+  })
+  
+  # Perform GO enrichment
+  go <- enrichGO(
+    gene = iterable_entrez[[1]],
+    universe = iterable_entrez[[2]],
+    OrgDb = org.Hs.eg.db,
+    keyType = "ENTREZID",
+    ont = ontology,
+    pAdjustMethod = "BH",
+    pvalueCutoff = 0.01,
+    qvalueCutoff = 0.05,
+    readable = TRUE
+  )
+  go <- go[, c("ID", "Description", "p.adjust", "geneID")]
+  go
+}
+
