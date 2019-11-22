@@ -692,6 +692,26 @@ calc_sil_width <- function(object, clusters, npcs, ncell) {
   summary(silhouette(as.numeric(clusters_sub), dd))$avg.width
 }
 
+calc_total_withink_ss <- function(seurat) {
+  # Calculates de total within-cluster sum of squares for a clustered Seurat object  
+  # 
+  # Args:
+  #   seurat: Seurat object with a "seurat_clusters" column in the metadata slot
+  #           indicating the cluster id for every cell.
+  #      
+  # Returns:
+  #   A numeric with the total sum of squares.
+  withink_ss <- map_dbl(levels(seurat$seurat_clusters), function(k) {
+    cells <- seurat[["RNA"]]@scale.data[, seurat$seurat_clusters == k]
+    centroid <- rowMeans(cells)
+    dists <- map_dbl(colnames(cells), function(x) {
+      dist(rbind(cells[, x], centroid), method = "euclidean")  
+    })
+    sum(dists)
+  })
+  total_withink_ss <- sum(withink_ss)
+}
+
 run_clusterProfiler <- function(target, universe, ontology) {
   # Runs Gene Ontology enrichment analysis using clusterProfiler.
   # 
