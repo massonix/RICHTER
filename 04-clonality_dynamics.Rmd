@@ -1,0 +1,129 @@
+---
+title: "CLL clonality evolution"
+author: "Ramon Massoni-Badosa"
+date: "1/31/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+# Introduction
+The objective of this notebook is to understand how the subclones we identified in the previous notebook evolve over the course of chronic lymphocytic leukemia (CLL). We will do that for each of the 3 donors (ICGC_012, ICGC_019 and ICGC_365).
+
+# Pre-processing
+
+## Load packages
+
+```{r}
+library(Seurat)
+library(kBET)
+library(cluster)
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(ggpubr)
+library(ggrepel)
+library(MAST)
+library(infercnv)
+library(monocle)
+library(GOstats)
+library(tidyverse)
+library(viridis)
+```
+
+## Source script with functions
+
+```{r}
+source("bin/utils.R")
+```
+
+## Load data
+
+```{r}
+richter_l <- readRDS("results/R_objects/richter_seurat_patients_list_clustered.rds")
+```
+
+
+# Clonality dynamics
+We have serial blood samples for 3 CLL patients, starting at the diagnosis, following by progression and different relapses to treatment, and ending with [Richter transformation](https://ashpublications.org/blood/article/131/25/2761/37138/Biology-and-treatment-of-Richter-syndrome). Let us study the evolution of the intratumoral heterogeneity with stacked bar plots of the proportion of each subclone across the disease phases:
+
+```{r}
+colorblind_cols <- c("#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", 
+                     "#D55E00", "#CC79A7")
+palette2 <- c("#c20a35", "#aa2edc", "#71bdd0", "#bbaa2a", "#c0e212")
+stacked_barplots <- purrr::map(richter_l, function(seurat) {
+  df <- seurat@meta.data %>% 
+    select("seurat_clusters", "status") %>% 
+    group_by(status, seurat_clusters) %>% 
+    summarize(n_cells = n()) %>% 
+    ungroup() %>% 
+    group_by(status) %>% 
+    mutate(total = sum(n_cells)) %>% 
+    ungroup() %>% 
+    mutate(pct_cells = n_cells / total * 100) 
+  bar_plot_pct <- ggplot(df, aes(x = status, y = pct_cells, fill = seurat_clusters)) +
+    geom_col() +
+    labs(x = "", y = "Percentage of cells (%)", fill = "cluster") +
+    scale_fill_manual(values = palette2) +
+    theme_classic() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 13))
+  bar_plot_pct
+})
+stacked_barplots
+```
+
+We observe how, for patients 012 and 019, there seems to be a [clonal equilibrium](https://ashpublications.org/bloodadvances/article-lookup/doi/10.1182/bloodadvances.2019000367) betwen two predominant clusters; which is broken in Richter transformation with the outgrowth of a third subpopulation. Importantly, this Richter-specific subclone seems to be present in a very small fraction already at diagnosis, progression and relapses. This suggest that single-cell could be used to infer at diagnosis if a patient will undergo Richter transformation.
+
+To shed light into this hypothesis, we need to discard that the richter-specific case found at diagnosis/progression/relapse were not misclassified. Particularly, that would be the case if they showed up in the border of two clusters in the tSNE. 
+
+```{r}
+plots <- purrr::map(richter_l, function(seurat) {
+  clusters_gg <- DimPlot(seurat, reduction = "umap")
+  Idents(seurat) <- "status"
+  status_gg <- DimPlot(seurat, reduction = "umap")
+  Idents(seurat) <- "seurat_clusters"
+  list(clusters_gg, status_gg)
+})
+plots <- purrr::map(plots, ~ ggarrange(plotlist = .x, nrow = 1, ncol = 2))
+ggarrange(plotlist = plots, nrow = 3, ncol = 1)
+```
+
+Indeed, the cells are embedded in the richter-predominant cluster, so we can be confident with the clustering.
+
+Another important realization is that the small cluster 4 in patient 012 seems to be mostly present in the progression phase. As we saw in the previous notebook, a marker of this cluster is CLPTM1L, which has been described as a susceptibility loci for chronic lymphocytic leukemia:
+
+```{r}
+FeaturePlot(richter_l$ICGC_012, features = "CLPTM1L", pt.size = 0.75, reduction = "tsne")
+```
+
+# Fish plot
+Potentially, I can represent the clonal dynamics with a fish plot with the `fishplot` package:
+
+https://bmcgenomics.biomedcentral.com/articles/10.1186/s12864-016-3195-z
+
+# CXCR4
+An important marker that showed up in the previous notebook is CXCR4. This gene has been reported to bind to CXCL12, a chemokine secreted by nurse-like cells in the lymph node. Importantly, this connection seems to activate BcR signaling and is associated with a poorer outcome. Thus, we can visualize the expression of this gene in our datasets:
+
+```{r}
+purrr::map(
+  richter_l, 
+  FeaturePlot, 
+  features = "CXCR4", 
+  reduction = "umap", 
+  pt.size = 0.75,
+  cols = viridis(20)
+)
+```
+
+Of note, we observe a clear gradient of expression between the two CLL clusters in both patient 012 and 019. Thus, the proper way to model this clusters will be infering a trajectory and predicting cell states, as the process represents a continuum rather than separate bins. 
+
+Hence, we will use [PAGA](https://genomebiology.biomedcentral.com/articles/10.1186/s13059-019-1663-x) to infer the trajectories, compute the pseudotime, and find the genes that drive this process. PAGA was among the trajectory inference tools that performed more robustly in a recent benchmarking published in [Nature Biotechnology](https://www.nature.com/articles/s41587-019-0071-9). Moreover, we will use [RNA velocity](https://www.nature.com/articles/s41586-018-0414-6) to give directionality to the infered trajectory.
+
+# Session Info
+
+```{r}
+sessionInfo()
+```
+

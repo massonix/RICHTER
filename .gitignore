@@ -2,3 +2,14 @@ data/*
 exploratory-sample-012.R
 results/*
 reports/*
+Trajectory inference and RNA velocity.ipynb
+Untitled.ipynb
+Untitled1.ipynb
+brain_storming.Rmd
+deprecated_annotation.Rmd
+deprecated_patient_012.Rmd
+deprecated_patient_019.Rmd
+deprecated_patient_365.Rmd
+diffxpy_paga.ipynb
+doc/*
+scanpy.yaml
