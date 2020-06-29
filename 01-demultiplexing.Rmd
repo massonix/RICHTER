@@ -104,7 +104,7 @@ richter <- CreateSeuratObject(counts = richter_rna)
 richter[["HTO"]] <- CreateAssayObject(counts = richter_hto)
 richter[["HTO"]]@counts
 ```
-The problem seems to be with the hashing of sample ICGC-3299-19-2768B, which contains no UMI. Hence, we will need to repeat the experiment for this particular sample. Nevertheless, we can proceed with the remaining ones.
+The problem seems to be with the hashing of sample ICGC-3299-19-2768B, which contains no UMI. Hence, we will need to analyze it carefully in subsequent analysis. Nevertheless, we can proceed with the remaining ones.
 
 We can visualize the results as ridge plots or heatmaps:
 

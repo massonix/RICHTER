@@ -11,7 +11,7 @@ knitr::opts_chunk$set(echo = TRUE)
 
 
 # Introduction
-The objective of this notebook is to understand how the subclones we identified in the previous notebook evolve over the course of chronic lymphocytic leukemia (CLL). We will do that for each of the 3 donors (ICGC_012, ICGC_019 and ICGC_365).
+The objective of this notebook is to understand how the subclones we identified in the previous notebook evolve over the course of chronic lymphocytic leukemia (CLL). We will do that for each of the 4 donors (ICGC_012, ICGC_019, ICGC_365, ICGC_3299).
 
 # Pre-processing
 
@@ -45,6 +45,35 @@ source("bin/utils.R")
 richter_l <- readRDS("results/R_objects/richter_seurat_patients_list_clustered.rds")
 ```
 
+After the QC performed in previous notebooks, we can plot the number of good-quality cells we have per patient and clinical time-point:
+
+```{r}
+n_cells_gg <- purrr::map2(richter_l, names(richter_l), function(seurat, x) {
+  df <- seurat@meta.data %>%
+    group_by(status) %>% 
+    summarise(n_cells = n())
+  p <- df %>% 
+    ggplot(aes(status, n_cells)) +
+      geom_col() +
+      geom_text(aes(label = n_cells), 
+                position = position_dodge(width = 0.9), vjust = -0.25, size = 9) +
+      scale_y_continuous(limits = c(0, (max(df$n_cells) + 500))) +
+      labs(title = x, x = "", y = "Number of good-quality cells") +
+      theme_classic() +
+      theme(plot.title = element_text(size = 20, hjust = 0.5),
+            axis.text.x = element_text(size = 18, angle = 45, hjust = 1, vjust = 1),
+            axis.title.y = element_text(size = 19))
+  p
+})
+n_cells_gg <- ggarrange(plotlist = n_cells_gg, nrow = 1, ncol = 4, align = "h")
+ggsave(
+  filename = "results/plots/number_good_cells_richter.png",
+  plot = n_cells_gg,
+  width = 27,
+  height = 9
+)
+n_cells_gg
+```
 
 # Clonality dynamics
 We have serial blood samples for 3 CLL patients, starting at the diagnosis, following by progression and different relapses to treatment, and ending with [Richter transformation](https://ashpublications.org/blood/article/131/25/2761/37138/Biology-and-treatment-of-Richter-syndrome). Let us study the evolution of the intratumoral heterogeneity with stacked bar plots of the proportion of each subclone across the disease phases:
@@ -55,23 +84,54 @@ colorblind_cols <- c("#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2",
 palette2 <- c("#c20a35", "#aa2edc", "#71bdd0", "#bbaa2a", "#c0e212")
 stacked_barplots <- purrr::map(richter_l, function(seurat) {
   df <- seurat@meta.data %>% 
-    select("seurat_clusters", "status") %>% 
-    group_by(status, seurat_clusters) %>% 
+    select("annotation", "status") %>% 
+    group_by(status, annotation) %>% 
     summarize(n_cells = n()) %>% 
     ungroup() %>% 
     group_by(status) %>% 
     mutate(total = sum(n_cells)) %>% 
     ungroup() %>% 
     mutate(pct_cells = n_cells / total * 100) 
-  bar_plot_pct <- ggplot(df, aes(x = status, y = pct_cells, fill = seurat_clusters)) +
+  bar_plot_pct <- ggplot(df, aes(x = status, y = pct_cells, fill = annotation)) +
     geom_col() +
     labs(x = "", y = "Percentage of cells (%)", fill = "cluster") +
     scale_fill_manual(values = palette2) +
     theme_classic() +
-    theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 13))
+    theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 13),
+          legend.title = element_blank())
   bar_plot_pct
 })
 stacked_barplots
+
+# Save
+stacked_barplots <- purrr::map2(stacked_barplots, names(stacked_barplots), function(p, x) {
+  p +
+    ggtitle(x) +
+    theme(plot.title = element_text(size = 22, face = "bold", hjust = 0.5),
+          axis.text.x = element_text(size = 20),
+          axis.title.y = element_text(size = 20),
+          legend.text = element_text(size = 20))
+})
+stacked_barplots_arr <- ggarrange(
+  plotlist = stacked_barplots,
+  nrow = 2,
+  ncol = 2,
+  align = "h"
+)
+ggsave(
+  filename = "results/plots/clonal_dynamics_barplot_arranged.png",
+  plot = stacked_barplots_arr,
+  width = 32,
+  height = 15
+)
+# purrr::walk2(stacked_barplots, names(stacked_barplots), function(p, x) {
+#   ggsave(
+#     filename = str_c("results/plots/clonal_dynamics_barplot_", x, ".png"),
+#     plot = p,
+#     width = 14,
+#     height = 8
+#   )
+# })
 ```
 
 We observe how, for patients 012 and 019, there seems to be a [clonal equilibrium](https://ashpublications.org/bloodadvances/article-lookup/doi/10.1182/bloodadvances.2019000367) betwen two predominant clusters; which is broken in Richter transformation with the outgrowth of a third subpopulation. Importantly, this Richter-specific subclone seems to be present in a very small fraction already at diagnosis, progression and relapses. This suggest that single-cell could be used to infer at diagnosis if a patient will undergo Richter transformation.
@@ -79,20 +139,20 @@ We observe how, for patients 012 and 019, there seems to be a [clonal equilibriu
 To shed light into this hypothesis, we need to discard that the richter-specific case found at diagnosis/progression/relapse were not misclassified. Particularly, that would be the case if they showed up in the border of two clusters in the tSNE. 
 
 ```{r}
-plots <- purrr::map(richter_l, function(seurat) {
+plots <- purrr::map(richter_l[1:2], function(seurat) {
   clusters_gg <- DimPlot(seurat, reduction = "umap")
   Idents(seurat) <- "status"
   status_gg <- DimPlot(seurat, reduction = "umap")
-  Idents(seurat) <- "seurat_clusters"
+  Idents(seurat) <- "annotation"
   list(clusters_gg, status_gg)
 })
 plots <- purrr::map(plots, ~ ggarrange(plotlist = .x, nrow = 1, ncol = 2))
-ggarrange(plotlist = plots, nrow = 3, ncol = 1)
+ggarrange(plotlist = plots, nrow = 2, ncol = 1)
 ```
 
 Indeed, the cells are embedded in the richter-predominant cluster, so we can be confident with the clustering.
 
-Another important realization is that the small cluster 4 in patient 012 seems to be mostly present in the progression phase. As we saw in the previous notebook, a marker of this cluster is CLPTM1L, which has been described as a susceptibility loci for chronic lymphocytic leukemia:
+Another important realization is that the small cluster MZB1+/CLPTM1L+ in patient 012 seems to be mostly present in the pre-ibru and ibru-ongoing phases. As we saw in the previous notebook,  of this CLPTM1L has been described as a susceptibility loci for chronic lymphocytic leukemia:
 
 ```{r}
 FeaturePlot(richter_l$ICGC_012, features = "CLPTM1L", pt.size = 0.75, reduction = "tsne")
@@ -120,6 +180,68 @@ purrr::map(
 Of note, we observe a clear gradient of expression between the two CLL clusters in both patient 012 and 019. Thus, the proper way to model this clusters will be infering a trajectory and predicting cell states, as the process represents a continuum rather than separate bins. 
 
 Hence, we will use [PAGA](https://genomebiology.biomedcentral.com/articles/10.1186/s13059-019-1663-x) to infer the trajectories, compute the pseudotime, and find the genes that drive this process. PAGA was among the trajectory inference tools that performed more robustly in a recent benchmarking published in [Nature Biotechnology](https://www.nature.com/articles/s41587-019-0071-9). Moreover, we will use [RNA velocity](https://www.nature.com/articles/s41586-018-0414-6) to give directionality to the infered trajectory.
+
+Importantly, we first need to define the cell states across this trajectory, so have more resolution:
+
+```{r}
+richter_sub_l <- purrr::map(richter_l[c(1, 2, 4)], function(seurat) {
+  Idents(seurat) <- "annotation"
+  seurat <- subset(seurat, idents = c("CXCR4+", "CXCR4-"))
+  seurat <- pre_process_seurat(seurat)
+  seurat <- FindNeighbors(seurat)
+  seurat
+})
+resolutions <- c(0.45, 0.4, 0.25)
+richter_sub_l <- purrr::map2(richter_sub_l, resolutions, function(seurat, res) {
+  seurat <- FindClusters(seurat, resolution = res)
+  seurat
+})
+plots_sub <- purrr::map(richter_sub_l, DimPlot)
+
+
+table(richter_l$ICGC_012$annotation)
+table(richter_l$ICGC_019$annotation)
+richter_l_sub <- purrr::map(richter_l, function(seurat) {
+  Idents(seurat) <- "annotation"
+  seurat <- subset(seurat, idents = c("CXCR4+ CLL", "CXCR4- CLL"))
+  seurat
+})
+```
+
+We can see how these states relate with the clinical phases
+
+```{r}
+purrr::map(richter_sub_l, function(seurat) {
+  Idents(seurat) <- "status"
+  DimPlot(seurat)
+})
+```
+
+For patient 012, it seems that the trajectory is determined partially by the clinical stage, with richter in one end of the trajectory and diagnosis/progression in the middle. For patient 019 this relationship is not as straight forward, and it seems to be more intermixing between samples.
+
+# Save subsetted Seurat objects
+
+```{r}
+saveRDS(richter_sub_l, "results/R_objects/richter_list_cxcr4.rds")
+```
+
+As part of it will be analysed with scanpy, let us save it as anndata objects:
+
+```{r}
+reticulate::use_virtualenv("/opt/anaconda3/envs/scanpy3/")
+sceasy::convertFormat(
+  richter_012_sub, 
+  from = "seurat",
+  to = "anndata",
+  outFile = str_c("results/anndata_objects/richter_012_2_subclones.h5ad")
+)
+sceasy::convertFormat(
+  richter_019_sub, 
+  from = "seurat",
+  to = "anndata",
+  outFile = str_c("results/anndata_objects/richter_019_2_subclones.h5ad")
+)
+```
 
 # Session Info
 

@@ -9,14 +9,6 @@ output: html_document
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
-TO DO: give an annotation to the separate clusters/subclones so the stacked bar plots are more easily interpreted:
-
-- CXCR4+ CLL
-- CXCR4- CLL
-- Richter-like
-- Proliferative
-- CLPTM1L +
-
 
 # Introduction
 In previous notebooks, we (i) demultiplexed the cells to classify them to the right condition, (ii) filtered out poor-quality cells and genes, and (iii) normalized gene counts. Here, we aim to cluster cells and annotate them to their respective cell type. Particularly, we seek to address which cells belong to the microenvironment (T cells/Monocytes/Dendritic Cells), and which are leukemic. We hypothesize that there are several patient-specific CLL subclones that evolve differently across the disease course.
@@ -48,7 +40,15 @@ We will load the demultiplexed, filtered and normalized Seurat object:
 richter <- readRDS("results/R_objects/richter_seurat_filtered_normalized.rds")
 ```
 
-Remeber that we have 3 patients and, for each of them, several clinical time-points:
+We will merge it with the seurat object of the patient for which we had problems initially with the demultiplexing:
+
+```{r}
+richter_3299 <- readRDS("results/R_objects/richter_seurat_3299_filtered_normalized.rds")
+richter <- merge(x = richter, y = richter_3299)
+richter
+```
+
+Remeber that we have 4 patients and, for each of them, several clinical time-points:
 
 ```{r}
 table(richter$patient_id, richter$status)
@@ -70,11 +70,47 @@ MAKE SURE THE CLUSTER I'M DISCARDING IS NOT AN INTERMEDIATE STATE BETWEEN CLONES
 richter <- pre_process_seurat(richter)
 richter <- FindNeighbors(richter, reduction = "pca", dims = 1:15)
 richter <- FindClusters(richter, resolution = 0.25)
-plots <- map(c("seurat_clusters", "patient_id", "status"), function(x) {
+richter_labels <- c(
+  "richter_sp",
+  "richter_while-ibrutinib",
+  "richter_post-ofatu-duvelisib"
+)
+richter$is_richter <- ifelse(
+  richter$status %in% richter_labels,
+  "richter",
+  "non-richter"
+)
+plots <- map(c("seurat_clusters", "patient_id", "is_richter"), function(x) {
   Idents(richter) <- x
-  DimPlot(richter, reduction = "tsne")
+  DimPlot(richter, reduction = "umap")
 })
+palette_patient <- c(
+  "brown3",
+  "cornflowerblue",
+  "darkgoldenrod2",
+  "forestgreen"
+)
+plots[[2]] <- plots[[2]] +
+  scale_color_manual("patient ID", values = palette_patient)
+plots[[3]] <- plots[[3]] +
+  scale_color_manual("", values = c("gray51", "red1"))
 ggarrange(plotlist = plots, nrow = 3, ncol = 1)
+plots <- purrr::map(plots, function(p) {
+  p +
+    theme(legend.text = element_text(size = 18),
+          legend.title = element_text(size = 20),
+          axis.line = element_blank(),
+          axis.ticks = element_blank(),
+          axis.title = element_blank(),
+          axis.text = element_blank())
+})
+plots_arr <- ggarrange(plotlist = plots, nrow = 1, ncol = 3)
+ggsave(
+  filename = "results/plots/umaps_clustering_all.png",
+  plot = plots_arr,
+  width = 24,
+  height = 8
+)
 ```
 
 From the 3 plots above, we can extract the following information:
@@ -99,143 +135,272 @@ DoHeatmap(richter, features = unlist(markers_selection))
 
 Based on the previous markers and tSNEs, we can conclude the following for each cluster:
 
-*Cluster 0: ICGC_019-specific leukemic cluster (IGLC2)
-*Cluster 1: ICGC_012-specific leukemic cluster. It possesses genes that are critical in CLL pathogenesis: [PCDH9](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC3248930/), which is upregulated in ATM-definicient CLL; [MIR155HG](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC4110661/), a miRNA that targets SHIP1 to increase BcR signalling in leukemic cells while they pass through the lymph node, and [TCL1A](https://www.nature.com/articles/modpathol2008148), whose expression was correlated with shorter time to treatment in CLL patients. 
-*Cluster 2: T-cells (CD3D, IL7R)
-*Cluster 3: ICGC_019- and richter-specific. A paralog of TSHZ2 (TSHZ3) was found to be [hypermethylated in CLL](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC5450117/). Moreover, FKBP5 is involved in several cancers and [regulates NFKB signaling](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC3039800/)
-*Cluster 4: ICGC_012- and richter-specific. 
-*Cluster 5: ICGC_365- and richter-specific. CCL3 is an important chemokine that CLL cells use to communicate with the microenvironment in the [lymph node](https://www.tandfonline.com/doi/full/10.3109/10428194.2015.1068308).
-*Cluster 6: Poor-quality cluster. Markers of this cluster include mitochondrial genes such as: MT-CO3, MT-ATP6, MT-ND2, MT-ND1, MT-ND3.
-*Cluster 7: Natural Killer (GNLY, GZMB)
-*Cluster 8: Monocytes (LYZ, S100A8)
-*Cluster 9: ICGC_365-specific. Leukemic (IGHV3-48). Interestingly, it has a marker (CLPTM1L) that was reported as a CLL susceptibility loci in a [GWAS study](https://www.nature.com/articles/ng.2843).
-*Cluster 10: ICGC_012-specific. Potentially leukemic (IGKV1D-33, IGHV1-69D), but the very low cell number makes it possible that they are CD5-CD19+ naive B cells.
-*Cluster 11: erythrocyte precursors? (HBA1, HBD, HBM)
+*Cluster 0: ICGC_019-specific leukemic cluster: CD37 is a marker of mature B cells and it is involved in T-B interactions, and is a [potential target for CLL therapies](https://www.nature.com/articles/leu2011233).
+*Cluster 1: ICGC_012-specific leukemic cluster (IGKC). It possesses genes that are critical in CLL pathogenesis: [PCDH9](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC3248930/), which is upregulated in ATM-deficient CLL; [MIR155HG](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC4110661/), a miRNA that targets SHIP1 to increase BcR signalling in leukemic cells while they pass through the lymph node, and [TCL1A](https://www.nature.com/articles/modpathol2008148), whose expression was correlated with shorter time to treatment in CLL patients. 
+*Cluster 2: ICGC_3299-specific leukemic cluster (IGLC2, IGHG3). VPREB plays a role in [the assembly of the pre-B cell receptor](http://www.haematologica.org/content/95/12/2056.long).
+*Cluster 3: T-cells (IL7R, CD3D).
+*Cluster 4: ICGC_3299-specific.
+*Cluster 5: ICGC_019- and richter-specific. A paralog of TSHZ2 (TSHZ3) was found to be [hypermethylated in CLL](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC5450117/). Moreover, FKBP5 is involved in several cancers and [regulates NFKB signaling](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC3039800/)
+*Cluster 6: ICGC_3299-specific. Potentially an artifact resulting from the cold-shock response, as it has several markers that we found in our initial [benchmarking paper](https://www.biorxiv.org/content/10.1101/2020.01.15.897066v1): JUND, EIF1, RBM38 and FTH1.
+*Cluster 7: ICGC_012-specific cluster.
+*Cluster 8: ICGC_365-specific leukemic (IGLL). FOXH1 was reported as [a regulator of mutant TP53 in myeloid leukemia](http://cancerdiscovery.aacrjournals.org/cgi/pmidlookup?view=long&pmid=31068365). Moreover, it contains the marker CCND2 which codes for a cyclin involve in the cell cycle.
+*Cluster 9: poor-quality cluster, with mitochondrial (MT-CO3, MT-ATP6, MT-ND1, MT-CYB), ribosomal (RPL10, RPS4X, RPS18, RPL19) and nuclear (MALAT1) markers.
+*Cluster 10: Natural Killer cells (GNLY, GZMB, NKG7)
+*Cluster 11: Monocytes (S100A9, S100A8, LYZ)
+*Cluster 12: ICGC_365-specific. Leukemic (IGHV3-48)
+*Cluster 13: erythrocyte precursors? (HBA1, HBD, HBM)
+*Cluster 14: ICGC_012-specific leukemic cluster (IGKV1D-33, IGHV1-69D). Interestingly, it has a marker (CLPTM1L) that was reported as a CLL susceptibility loci in a [GWAS study](https://www.nature.com/articles/ng.2843).
 
-As observed in other single-cell studies of other types of cancer ( [Tirosh et al.](https://science.sciencemag.org/content/352/6282/189/tab-pdf), [Patel et al.](Single-cell RNA-seq highlights intratumoral heterogeneity in primary glioblastoma)), cancer cells exhibit a vast inter-patient variability (they cluster aside), whilst healthy cells of the tumor microenvironment from different patients  are similar (cluster together).
 
-Although we plan to study the microenvironment in follow-up samples in this project, the current cell types are found in the peripheral blood, where they do not interact meaningfully with leukemic cells. Thus, to gain more signal into which genes are driving the clonality inside CLL, we will discard T-cells, monocytes, NK, and poor-quality cells. To have a quick view of this segregation, we plot the expression of CD79B, a marker of the B-cell lineage:
+As observed in other single-cell studies of other types of cancer ( [Tirosh et al.](https://science.sciencemag.org/content/352/6282/189/tab-pdf), [Patel et al.](Single-cell RNA-seq highlights intratumoral heterogeneity in primary glioblastoma)), cancer cells exhibit a vast inter-patient variability (they cluster aside), whilst healthy cells of the tumor microenvironment from different patients  are similar (cluster together). Moreover, in our case some clusters are both specific of the donor and the clinical stage (i.e. richter).
+
+Although we plan to study the microenvironment in follow-up samples in this project, most of the current cell types are found in the peripheral blood, where they do not interact meaningfully with leukemic cells. Thus, to gain more signal into which genes are driving the clonality inside CLL, we will discard T-cells, monocytes, NK, and poor-quality cells. To have a quick view of this segregation, we plot the expression of CD79B, a marker of the B-cell lineage:
 
 ```{r}
-FeaturePlot(richter, features = "CD79B", reduction = "tsne", pt.size = 0.75)
+leuk_vs_env <- FeaturePlot(
+  richter,
+  features = c("CD79B", "CD3D", "LYZ"),
+  reduction = "umap",
+  pt.size = 0.75,
+  combine = FALSE
+)
+leuk_vs_env <- purrr::map(leuk_vs_env, function(p) {
+  p +
+  theme(legend.text = element_text(size = 18),
+        legend.title = element_text(size = 20),
+        axis.line = element_blank(),
+        axis.ticks = element_blank(),
+        axis.title = element_blank(),
+        axis.text = element_blank())
+})
+leuk_vs_env <- ggarrange(
+  plotlist = leuk_vs_env,
+  ncol = 3,
+  common.legend = TRUE,
+  legend = "right"
+)
+ggsave(
+  filename = "results/plots/umaps_leuk_vs_env.png",
+  plot = leuk_vs_env,
+  width = 24,
+  height = 9
+)
 
 # Exclude uninteresting clusters:
-# 2 - T cells
-# 6 - poor-quality cells
-# 7 - Natural Killer
-# 8 - Monocytes
-richter_sub <- subset(richter, idents = c("0", "1", "3", "4", "5", "9", "10", "11"))
+# 3 - T cells
+# 9 - poor-quality cells
+# 10 - Natural Killer
+# 11 - Monocytes
+richter_sub <- subset(
+  richter, 
+  idents = c("0", "1", "2", "4", "5", "6", "7", "8", "12", "13", "14")
+)
+richter_microenvironment <- subset(
+  richter,
+  idents = c("3", "10", "11", "13")
+)
+saveRDS(richter_microenvironment, "results/R_objects/richter_microenvironment.rds")
 ```
 
-Importantly, every time we make a subset we are modifying the sources of variance in our dataset, so we need to recompute the highly variable genes:
-
-```{r}
-richter_sub <- pre_process_seurat(richter_sub)
-```
-
-As we have gained resolution, we can recluster to gain more granularity:
-
-```{r}
-richter_sub <- FindNeighbors(richter_sub, reduction = "pca", dims = 1:15)
-richter_sub <- FindClusters(richter_sub, resolution = 0.4)
-plots2 <- purrr::map(c("seurat_clusters", "patient_id", "status"), function(x) {
-  Idents(richter_sub) <- x
-  DimPlot(richter_sub, reduction = "tsne")
-})
-ggarrange(plotlist = plots2, nrow = 3, ncol = 1)
-```
-
-We observe a striking difference in the number of cells between patients 012/019 and 365. For the former, we can enough sample size to detect meaningful subclones, whilst for the latter we have less power. Notably, patients 012 and 019 seem to have a shared clonality: two major CLL subclones among the major phases of the disease and a richter-specific cluster. Furthermore, patient 012 has an extra cluster (9) which might have interesting properties. Let us shed some light by recomputing the markers for the new clusters:
-
-```{r}
-markers_sub <- FindAllMarkers(richter_sub)
-write_tsv(markers_sub, "results/tables/all_patients_markers_sub.tsv", col_names = TRUE)
-# markers_sub <- read_tsv("results/tables/all_patients_markers_sub.tsv", col_names = TRUE)
-markers_sub_selection <- map(levels(richter_sub$seurat_clusters), ~ head(markers_sub[markers_sub$cluster == .x, "gene"], 40))
-markers_sub_selection <- map(levels(richter_sub$seurat_clusters), function(x) {
-  head(markers_sub[markers_sub$cluster == x & markers_sub$avg_logFC > 0, "gene"], 8)
-})
-names(markers_sub_selection) <- levels(richter_sub$seurat_clusters)
-DoHeatmap(richter_sub, features = unlist(markers_sub_selection))
-```
-
-For each patient, we will subset to its specific clusters and visualize the clonality dynamics. Moreover, we will recompute the clusters of patient 365, as the true structure of these cells might be masked by the variability of the predominant clusters.
+# Patient-specific clustering
+At this point, given the striking inter- and intra-patient variability in the dataset, we will create a list of patient-specific seurat objects. Importantly, every time we make a subset we are modifying the sources of variance in our dataset, so we need to recompute the highly variable genes:
 
 ```{r}
 richter_l <- SplitObject(richter_sub, split.by = "patient_id")
-richter_l$ICGC_012 <- subset(richter_l$ICGC_012, idents = c("2", "4", "5", "7", "9"))
-richter_l$ICGC_019 <- subset(richter_l$ICGC_019, idents = c("0", "1", "3", "7"))
-richter_l$ICGC_365 <- subset(richter_l$ICGC_365, idents = c("6", "7", "8"))
-
-# Every time we subset a single-cell object we need to recompute the HVG
-richter_l <- purrr::map(richter_l, pre_process_seurat)
-
-# Recluster 365
-richter_l$ICGC_365 <- FindNeighbors(richter_l$ICGC_365)
-richter_l$ICGC_365 <- FindClusters(richter_l$ICGC_365, resolution = 0.25)
-
-# Plot UMAP for every patient
-plots3 <- purrr::map(richter_l, DimPlot, reduction = "umap")
-plots3
-
-# Recluster 012
-richter_l$ICGC_012 <- FindNeighbors(richter_l$ICGC_012)
-richter_l$ICGC_012 <- FindClusters(richter_l$ICGC_012, resolution = 0.15)
-DimPlot(richter_l$ICGC_012, reduction = "umap")
+richter_l <- purrr::map(richter_l, function(seurat) {
+  seurat %>%
+    pre_process_seurat() %>% 
+    FindNeighbors()
+})
 ```
 
+Now we can proceed to recluster each patient-specific object separately. As each of them have different substructures and number of cells, we will need to tailor the resolution to each patient:
 
-# Cell Cycle Scoring
+```{r}
+resolutions <- c(0.15, 0.3, 0.25, 0.4)
+richter_l <- purrr::map2(richter_l, resolutions, function(seurat, res) {
+  seurat <- FindClusters(seurat, resolution = res)
+  seurat
+})
+umaps_patients <- purrr::map(
+  richter_l,
+  DimPlot,
+  reduction = "umap",
+  pt.size = 0.75
+)
+umaps_patients
+```
+
+To enhance interpretability, we will annotate them by the presence or absence of a specific marker:
+
+```{r}
+markers_l <- purrr::map(richter_l, FindAllMarkers)
+saveRDS(markers_l, "results/R_objects/markers_list_patient-specific_seurat.rds")
+markers_l
+```
+
+Inspecting the markers, we can extract very relevant information. First, the top up-regulated gene in the predominant clusters of patients ICGC_012 and ICGC_019 is CXCR4. This gene codes a chemokine receptor that is down-regulated upon the up-regulation of MIR155HG (which we mentioned before); and is critical in the interaction between nurse-like cells  and CLL cells in the lymph node microenvironment [through its interaction with CXCL12](https://link.springer.com/article/10.1007%2Fs00277-003-0679-0). Particularly, exposure to the lymph node [reduces the expression of CXCR4](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC4110661/). 
+
+Of note, it has been described that [blocking CXCR4 suppresses CLL progression](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC5040679/).
+
+Let us project the expression of this gene in our dataset:
+
+```{r}
+umaps_cxcr4 <- purrr::map(richter_l, function(seurat) {
+  cxcr4 <- FeaturePlot(seurat, features = "CXCR4", reduction = "umap")
+  clusters <- DimPlot(seurat, reduction = "umap")
+  ggarrange(plotlist = list(cxcr4, clusters), ncol = 2, nrow = 1)
+})
+umaps_cxcr4
+```
+
+As we can see, for all patients there is a cluster with an upregulation of CXCR4. Importantly, we observe a clear gradient of expression between two CLL clusters. Thus, the proper way to model this clusters will be infering a trajectory and predicting cell states, as the process represents a continuum rather than separate bins. We hypothesize that this trajectory reflects the overall amount of exposure to the lymph node microenvironment. For now, we will annotate those clusters as "CXCR4+" and "CXCR4-" to visualize the evolution of the clonality in subsequent notebooks. We will also subset to only these clusters and recluster to predict cell states along this trajectory. We will save these objects separately and load them in the future within [Scanpy](https://genomebiology.biomedcentral.com/articles/10.1186/s13059-017-1382-0), where we will use [PAGA](https://genomebiology.biomedcentral.com/articles/10.1186/s13059-019-1663-x) to compute the pseudotime and [RNA velocity](https://www.nature.com/articles/s41586-018-0414-6) to give directionality to the trajectory.
+
+On the other hand, some clusters are almost exclusive of the Richter phase of the disease:
+
+```{r}
+richter_phases <- c(
+  "richter_sp",
+  "richter_while-ibrutinib",
+  "richter_post-ofatu-duvelisib"
+)
+richter_l <- purrr::map(richter_l, function(seurat) {
+  seurat$is_richter <- ifelse(seurat$status %in% richter_phases, TRUE, FALSE)
+  Idents(seurat) <- "is_richter"
+  seurat
+})
+umaps_richter <- purrr::map(richter_l, function(seurat) {
+  richter_gg <- DimPlot(seurat, cols = c("gray", "red"))
+  Idents(seurat) <- "seurat_clusters"
+  clusters_gg <- DimPlot(seurat)
+  ggarrange(plotlist = list(richter_gg, clusters_gg), ncol = 2)
+})
+umaps_richter
+```
+
+## ICGC_012
+For ICGC_012, there are still two unannotated clusters (3, 4). Let us have a look at its markers:
+
+```{r}
+mask <- markers_l$ICGC_012$cluster == "3" & markers_l$ICGC_012$avg_logFC > 0
+head(markers_l$ICGC_012[mask, ], 20)
+```
+
+For cluster 3 we observe CLPTM1L, which we already commented that is a susceptibility locus for CLL. Moreover, MZB1 has an average logFC > 3. A high expression of this gene has been linked to poor prognosis in a variety of B-cell malignancies, including CLL. In addition, it is [associated with a unique expression profile](https://ashpublications.org/blood/article/118/21/3657/69000/High-Expression-of-the-Endoplasmic-Reticulum). Thus, we can label this cells as MZB1+
+
+```{r}
+mask <- markers_l$ICGC_012$cluster == "4" & markers_l$ICGC_012$avg_logFC > 0
+head(markers_l$ICGC_012[mask, ], 20)
+```
+Cluster 4 contains very few number of potential erythrocyte precursors, as they express hemoglobin. Given the lower number of cells, we can remove them for subsequent analysis.
+
+Annotation:
+
+Cluster ID | Annotation
+-----------|------------
+0          | CXCR4+          
+1          | CXCR4-        
+2          | Richter-like  
+3          | MZB1+
 
 ```{r}
 richter_l <- purrr::map(richter_l, function(seurat) {
-  seurat <- CellCycleScoring(
-    seurat, 
-    s.features = cc.genes$s.genes, 
-    g2m.features = cc.genes$g2m.genes
-  )
+  Idents(seurat) <- "seurat_clusters"
+  seurat
 })
-purrr::map(richter_l, FeaturePlot, features = c("S.Score", "G2M.Score"))
+richter_l$ICGC_012 <- subset(richter_l$ICGC_012, idents = c("0", "1", "2", "3"))
+richter_l$ICGC_012$annotation <- droplevels(richter_l$ICGC_012$seurat_clusters)
+levels_012 <- c("CXCR4+", "CXCR4-", "Richter-like", "MZB1+")
+levels(richter_l$ICGC_012$annotation) <- levels_012
+Idents(richter_l$ICGC_012) <- "annotation"
+DimPlot(richter_l$ICGC_012, pt.size = 0.75)
 ```
-
-# Annotation
-
-To aid interpretation in downstream analysis, we proceed to annotate each tumor subclone of the patients with more cells (012, 019). For the two predominant CLL clusters, we will use the expression of CXCR4, which is a key gene in the interaction between CLL cells and the microenvironment in CLL. Thus, we will label one as "CXCR4+ CLL" and the other as "CXCR4-" based on whether it is expressed or not. On the other hand, we will label the cluster that is present mostly in Richter as "richter-like", and the small subclone in patient 012 as "CLPTM1L+". Finally, we will also annotate the proliferative cluster:
+     
+## ICGC_019
+For patient 019 we still don't know the identity of cluster 3:
 
 ```{r}
-# Plot CXCR4 expression
-purrr::map(
-  richter_l, 
-  FeaturePlot, 
-  features = c("CXCR4", "CLPTM1L"), 
-  pt.size = 0.75
-)
-
-# Annotate
-richter_l$ICGC_012$annotation <- richter_l$ICGC_012$seurat_clusters
-levels(richter_l$ICGC_012$annotation) <- c(
-  "CXCR4+ CLL",
-  "CXCR4- CLL",
-  "richter-like",
-  "CLPTM1L+ CLL",
-  "proliferative"
-)
-richter_l$ICGC_019$seurat_clusters <- droplevels(richter_l$ICGC_019$seurat_clusters)
-richter_l$ICGC_019$annotation <- richter_l$ICGC_019$seurat_clusters
-levels(richter_l$ICGC_019$annotation) <- c(
-  "CXCR4+ CLL",
-  "CXCR4- CLL",
-  "richter-like",
-  "proliferative"
-)
-Idents(richter_l$ICGC_012) <- "annotation"
-DimPlot(richter_l$ICGC_012)
-Idents(richter_l$ICGC_019) <- "annotation"
-DimPlot(richter_l$ICGC_019)
+mask <- markers_l$ICGC_019$cluster == 3 & markers_l$ICGC_019$avg_logFC > 0
+head(markers_l$ICGC_019[mask, ], 20)
 ```
 
+Clearly, this cluster is composed by proliferating cells (MKI67)
 
-# Cold Shock Score
+Annotation:
+
+Cluster ID | Annotation
+-----------|------------
+0          | CXCR4+          
+1          | CXCR4-        
+2          | Richter-like  
+3          | Proliferative
+
+```{r}
+richter_l$ICGC_019$annotation <- richter_l$ICGC_019$seurat_clusters
+levels_019 <- c("CXCR4+", "CXCR4-", "Richter-like", "Proliferative")
+levels(richter_l$ICGC_019$annotation) <- levels_019
+Idents(richter_l$ICGC_019) <- "annotation"
+DimPlot(richter_l$ICGC_019, pt.size = 0.75)
+```
+
+## ICGC_365
+
+Annotation:
+
+Cluster ID | Annotation
+-----------|------------
+0          | CCDC88A+
+1          | CXCR4+      
+2          | MIR155HG+
+3          | Proliferative
+
+```{r}
+richter_l$ICGC_365$annotation <- richter_l$ICGC_365$seurat_clusters
+levels_365 <- c("CCDC88A+", "CXCR4+", "MIR155HG+", "Proliferative")
+levels(richter_l$ICGC_365$annotation) <- levels_365
+Idents(richter_l$ICGC_365) <- "annotation"
+DimPlot(richter_l$ICGC_365, pt.size = 0.75)
+```
+
+## ICGC_3299
+
+Annotation:
+
+Cluster ID | Annotation
+-----------|------------
+0          | FKBP5+
+1          | CXCR4+      
+2          | CD69+
+3          | CXCR4-
+4          | MIR155HG+
+
+
+```{r}
+richter_l$ICGC_3299 <- subset(richter_l$ICGC_3299, idents = as.character(0:4))
+richter_l$ICGC_3299$annotation <- droplevels(richter_l$ICGC_3299$seurat_clusters)
+levels_3299 <- c("FKBP5+", "CXCR4+", "CD69+", "CXCR4-", "MIR155HG+")
+levels(richter_l$ICGC_3299$annotation) <- levels_3299
+Idents(richter_l$ICGC_3299) <- "annotation"
+DimPlot(richter_l$ICGC_3299, pt.size = 0.75)
+```
+
+In the donor ICGC_3299 we observe a similar distinction between CXCR4+/CXCR4- clusters as in 012 and 019. However, regardless having no Richter time point in this dataset, we see two large extra clusters, which we annotated as FKBP5+ and CD69+. A peculiarity of the data from this donor is that the samples have different origin:
+
+```{r}
+table(richter_l$ICGC_3299$status, richter_l$ICGC_3299$source)
+```
+
+As we can see, whilst relapse1_post-chlorambucil and response_duvelisib represent cells from the bone marrow; relapse2_post_duvelisib represent cells from the peripheral blood. Thus, the different microenvironments might lead to different transcriptomic profiles:
+
+```{r}
+Idents(richter_l$ICGC_3299) <- "source"
+DimPlot(richter_l$ICGC_3299)
+```
+
+As we can see cells they cluster aside. Another potential source of heterogeneity is the difference in time at room temperature (RT) before cryopreservation of this samples, which introduces technical artifacts in the data. Let us compute a cold-shock score for each cell in our dataset using the signature we identified in our recent benchmarking article.
+
+
+## Cold-shock
 
 ```{r}
 cold_shock_signature <- readRDS("../../JULIA/current/2-CLL/results/R_objects/cold_shock_signature.rds")
@@ -245,6 +410,8 @@ richter_l <- purrr::map(richter_l, function(seurat) {
 })
 purrr::map(richter_l, FeaturePlot, features = "cold_shock_score1")
 ```
+
+We see that for ICGC_365 and ICGC_3299 there is a cluster that is potentially affected by this bias. It is hard, however, to disentangle this artifact from a potential upregulation of BcR signaling: (i) up-regulation of NFKB pathway and (ii) change in the number of sequenced transcripts. We will shed more light into this matter in future notebook to ensure our results are not biased
 
 To visualize how the cold-shock score varies across blood samples, we will recode the status variable to order the clinical phases:
 
@@ -272,6 +439,16 @@ richter_l$ICGC_365$status <- factor(
   richter_l$ICGC_365$status,
   levels = levels_status_365
 )
+
+# ICGC_3299
+levels_status_3299 <- c("relapse1_post-chlorambucil", "response_duvelisib", 
+                        "relapse2_post-duvelisib")
+richter_l$ICGC_3299$status <- factor(
+  richter_l$ICGC_3299$status,
+  levels = levels_status_3299
+)
+
+# Plot
 purrr::map(
   richter_l, 
   VlnPlot, 
@@ -281,7 +458,173 @@ purrr::map(
 )
 ```
 
-Comment on: cold-shock and BcR activation mask each other.
+
+# Cell Cycle Scoring
+
+```{r}
+richter_l <- purrr::map(richter_l, function(seurat) {
+  seurat <- CellCycleScoring(
+    seurat, 
+    s.features = cc.genes$s.genes, 
+    g2m.features = cc.genes$g2m.genes
+  )
+})
+purrr::map(richter_l, FeaturePlot, features = c("S.Score", "G2M.Score"))
+```
+
+Save plots:
+
+```{r}
+richter_l_sub <- richter_l[c("ICGC_012", "ICGC_019")]
+umaps_cxcr4_sub <- purrr::map(richter_l_sub, function(seurat) {
+  FeaturePlot(
+    seurat,
+    features = "CXCR4",
+    reduction = "umap",
+    pt.size = 0.75,
+    cols = viridis(10)
+  )
+})
+umaps_richter_sub <- purrr::map(richter_l_sub, function(seurat) {
+  Idents(seurat) <- "is_richter"
+  p <- DimPlot(seurat, reduction = "umap", pt.size = 0.75)
+  p +
+    scale_color_manual("", values = c("gray51", "red1"), 
+                       labels = c("non-richter", "richter"))
+})
+palette2 <- c("#c20a35", "#aa2edc", "#71bdd0", "#bbaa2a")
+umaps_annot_sub <- purrr::map(richter_l_sub, function(seurat) {
+  Idents(seurat) <- "annotation"
+  p <- DimPlot(seurat, reduction = "umap", pt.size = 0.75)
+  p +
+    scale_color_manual("", values = palette2)
+})
+umaps_list <- list(umaps_cxcr4_sub, umaps_richter_sub, umaps_annot_sub)
+umaps_list <- c(map(umaps_list, "ICGC_012"), map(umaps_list, "ICGC_019"))
+umaps_list <- purrr::map(umaps_list, function(p) {
+  p +
+    theme(plot.title = element_text(size = 28),
+          legend.text = element_text(size = 26),
+          legend.title = element_text(size = 27),
+          axis.line = element_blank(),
+          axis.ticks = element_blank(),
+          axis.title = element_blank(),
+          axis.text = element_blank())
+})
+umaps_arr <- ggarrange(plotlist = umaps_list, nrow = 2, ncol = 3)
+ggsave(
+  filename = "results/plots/umaps_annotation_012_019.png",
+  plot = umaps_arr,
+  width = 28,
+  height = 14
+)
+
+# MZB1+/CLPTM1L+ cluster
+richter_012 <- richter_l$ICGC_012
+vln_clptm1l <- VlnPlot(
+  richter_012,
+  features = c("MZB1", "CLPTM1L"),
+  group.by = "annotation",
+  pt.size = 0.1,
+  combine = FALSE
+)
+vln_clptm1l <- purrr::map(vln_clptm1l, function(p) {
+  p +
+    xlab("") +
+    theme(plot.title = element_text(size = 22),
+          axis.text.x = element_text(size = 18),
+          axis.title.y = element_text(size = 19),
+          legend.text = element_text(size = 18))
+})
+vln_clptm1l_arr <- ggarrange(
+  plotlist = vln_clptm1l,
+  nrow = 1,
+  ncol = 2,
+  common.legend = TRUE,
+  legend = "right"
+)
+ggsave(
+  filename = "results/plots/vln_mzb1_clptm1l.png",
+  plot = vln_clptm1l_arr,
+  width = 22,
+  height = 8
+)
+
+# ICGC_365
+umap_cxcr4_365 <- FeaturePlot(
+    richter_l$ICGC_365,
+    features = "CXCR4",
+    reduction = "umap",
+    pt.size = 1.25,
+    cols = viridis(10)
+)
+Idents(richter_l$ICGC_365) <- "is_richter"
+umap_richter_365 <- DimPlot(richter_l$ICGC_365, pt.size = 1.25)
+umap_richter_365 <- umap_richter_365 +
+  scale_color_manual("", values = c("red1", "gray51"),
+                     labels = c("richter", "non-richter"))
+Idents(richter_l$ICGC_365) <- "annotation"
+umap_annot_365 <- DimPlot(richter_l$ICGC_365, pt.size = 1.25, cols = palette2)
+umap_list_365 <- list(umap_cxcr4_365, umap_richter_365, umap_annot_365)
+umap_list_365 <- purrr::map(umap_list_365, function(p) {
+  p +
+    theme(plot.title = element_text(size = 28),
+          legend.text = element_text(size = 26),
+          legend.title = element_text(size = 27),
+          axis.line = element_blank(),
+          axis.ticks = element_blank(),
+          axis.title = element_blank(),
+          axis.text = element_blank())
+})
+umap_arr_365 <- ggarrange(plotlist = umap_list_365, nrow = 1, ncol = 3)
+ggsave(
+  filename = "results/plots/umaps_annotation_365.png",
+  plot = umap_arr_365,
+  width = 24,
+  height = 8
+)
+
+# ICGC_3299
+umap_cxcr4_3299 <- FeaturePlot(
+    richter_l$ICGC_3299,
+    features = "CXCR4",
+    reduction = "umap",
+    pt.size = 0.75,
+    cols = viridis(10)
+)
+Idents(richter_l$ICGC_3299) <- "status"
+umap_status_3299 <- DimPlot(richter_l$ICGC_3299, pt.size = 0.75)
+Idents(richter_l$ICGC_3299) <- "source"
+umap_source_3299 <- DimPlot(richter_l$ICGC_3299, pt.size = 0.75)
+umap_source_3299 <- umap_source_3299 +
+  scale_color_manual("", values = c("red1", "gray51"),
+                     labels = c("Bone Marrow", "Peripheral Blood"))
+Idents(richter_l$ICGC_3299) <- "annotation"
+umap_annot_3299 <- DimPlot(richter_l$ICGC_3299, pt.size = 0.75)
+umap_list_3299 <- list(
+  umap_cxcr4_3299,
+  umap_status_3299,
+  umap_source_3299,
+  umap_annot_3299
+)
+umap_list_3299 <- purrr::map(umap_list_3299, function(p) {
+  p +
+    theme(plot.title = element_text(size = 28),
+          legend.text = element_text(size = 26),
+          legend.title = element_text(size = 27),
+          axis.line = element_blank(),
+          axis.ticks = element_blank(),
+          axis.title = element_blank(),
+          axis.text = element_blank())
+})
+umap_arr_3299 <- ggarrange(plotlist = umap_list_3299, nrow = 2, ncol = 2)
+ggsave(
+  filename = "results/plots/umaps_annotation_3299.png",
+  plot = umap_arr_3299,
+  width = 24,
+  height = 12
+)
+```
 
 
 # Save objects

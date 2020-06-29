@@ -1,0 +1,183 @@
+---
+title: 'Smart-seq2: Proof-of-concept'
+author: "Ramon Massoni-Badosa"
+date: "6/22/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+# Parameters
+min_lib_size <- 110000
+max_lib_size <- 700000
+min_n_genes <- 300
+max_n_genes <- 4000
+min_n_cells <- 9
+```
+
+
+# Introduction
+
+The purpose of this notebook is to assess if we can reproduce our findings regarding CLL intra-tumor heterogeneity in an indepependent donor profiled by Smart-seq2.
+
+
+# Pre-processing
+
+## Load packages
+
+```{r}
+library(AnnotationDbi)
+library(org.Hs.eg.db)
+library(Seurat)
+library(scater)
+library(scran)
+library(tidyverse)
+```
+
+
+## Load data
+
+```{r}
+# Load expression matrices
+path_to_data <- "/Volumes/Massoni_external/B_cell_atlas/RICHTER/current/data/CLL_52/counts/"
+files <- str_c(path_to_data, list.files(path_to_data))
+smart_list <- purrr::map(files, function(x) read_tsv(gzfile(x)))
+smart_list <- purrr::map(smart_list, function(x) {
+  genes <- x$gene
+  plate_id <- colnames(x)[2:ncol(x)]
+  mat <- as.matrix(x[, 2:ncol(x)])
+  rownames(mat) <- genes
+  colnames(mat) <- plate_id
+  mat
+})
+names(smart_list) <- str_remove(list.files(path_to_data), ".tsv.gz")
+
+
+# Load cell metadata
+path_to_metadata <- "/Volumes/Massoni_external/B_cell_atlas/RICHTER/current/data/CLL_52/cells.tsv"
+metadata <- read_tsv(path_to_metadata, col_names = FALSE)
+colnames(metadata) <- c("barcode", "ids_general")
+metadata$plate <- str_extract(metadata$barcode, "^P....")
+metadata$well <- str_extract(metadata$ids_general, "...$")
+metadata$clinical_point_id <- str_remove(metadata$ids_general, "_...$")
+metadata$clinical_point_id <- str_remove(metadata$clinical_point_id, "^CLL_")
+metadata$clinical_point_desc <- case_when(
+  metadata$clinical_point_id == "05_599" ~ "blood_no_treatment",
+  metadata$clinical_point_id == "05_76" ~ "lymph_node_no_treatment",
+  metadata$clinical_point_id == "10_7434" ~ "blood_first_treatment",
+  metadata$clinical_point_id == "14_2116" ~ "lymph node_richter",
+  metadata$clinical_point_id == "empty" ~ "empty"
+)
+metadata <- metadata[, c("barcode", "plate", "clinical_point_id", "clinical_point_desc")]
+metadata <- as.data.frame(metadata)
+rownames(metadata) <- metadata$barcode
+metadata <- metadata[colnames(expression_matrix), ]
+```
+
+
+## Create Seurat Object
+
+```{r}
+expression_matrix <- Reduce(cbind, smart_list)
+ensembl_genes <- str_sub(rownames(expression_matrix), 1, 15)
+symbols <- mapIds(
+  org.Hs.eg.db,
+  keytype = "ENSEMBL",
+  column = "SYMBOL",
+  keys = ensembl_genes
+)
+symbols <- symbols[match(ensembl_genes, names(symbols))]
+symbols[is.na(symbols)] <- ensembl_genes[is.na(symbols)]
+symbols[duplicated(symbols)] <- str_c(symbols[duplicated(symbols)], 1:length(symbols[duplicated(symbols)]), sep = ".")
+rownames(expression_matrix) <- symbols
+
+smart <- CreateSeuratObject(expression_matrix, meta.data = metadata)
+```
+
+
+# Quality Control
+
+## Cell QC
+
+```{r}
+# Library size
+lib_size_gg <- smart@meta.data %>%
+  ggplot(aes(nCount_RNA)) +
+    geom_histogram(bins = 100) +
+    labs(x = "Library Size") +
+    theme_classic()
+lib_size_gg +
+  geom_vline(xintercept = min_lib_size, color = "red", linetype = "dashed") +
+  geom_vline(xintercept = max_lib_size, color = "red", linetype = "dashed")
+
+# Number of detected genes
+n_feat_gg <- smart@meta.data %>%
+  ggplot(aes(nFeature_RNA)) +
+    geom_histogram(bins = 100) +
+    labs(x = "# detected genes") +
+    theme_classic()
+n_feat_gg +
+  geom_vline(xintercept = min_n_genes, color = "red", linetype = "dashed") +
+  geom_vline(xintercept = max_n_genes, color = "red", linetype = "dashed")
+
+# Subset
+discard_cells <- 
+  smart$nCount_RNA < min_lib_size |
+  smart$nCount_RNA > max_lib_size |
+  smart$nFeature_RNA < min_n_genes |
+  smart$nFeature_RNA > max_n_genes
+table(discard_cells)
+smart$keep_cells <- !discard_cells
+smart <- subset(smart, subset = keep_cells == TRUE)
+```
+
+
+## Gene QC
+
+```{r}
+n_cells <- apply(as.matrix(smart[["RNA"]]@counts), 1, function(x) sum(x > 1))
+n_cells_gg <- n_cells %>%
+  as.data.frame() %>% 
+  ggplot(aes(n_cells)) +
+    geom_histogram() +
+    scale_x_log10("Number of Cells") +
+    theme_classic()
+n_cells_gg +
+  geom_vline(xintercept = min_n_cells, color = "red", linetype = "dashed")
+
+# Subset
+keep_genes <- rownames(smart[["RNA"]]@counts)[n_cells >= min_n_cells]
+smart <- subset(smart, features = keep_genes)
+```
+
+
+## Normalize
+
+```{r}
+smart <- NormalizeData(
+  smart,
+  normalization.method = "LogNormalize",
+  scale.factor = 1e4
+)
+```
+
+# Process Seurat object
+
+```{r}
+Idents(smart) <- "clinical_point_desc"
+smart <- subset(
+  smart,
+  idents = c("blood_no_treatment", "blood_first_treatment")
+)
+smart <- smart %>%
+  FindVariableFeatures() %>% 
+  ScaleData() %>% 
+  RunPCA() %>% 
+  RunUMAP(dims = 1:20)
+DimPlot(smart, group.by = "clinical_point_desc")
+```
+
+
