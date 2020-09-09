@@ -1,0 +1,174 @@
+---
+title: "Trajectory Inference"
+author: "Ramon Massoni-Badosa"
+date: "2/5/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introduction
+
+# Pre-processing
+
+## Load packages
+
+```{r}
+library(pheatmap)
+library(Seurat)
+library(kBET)
+library(cluster)
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(ggpubr)
+library(ggrepel)
+library(MAST)
+library(infercnv)
+library(monocle)
+library(GOstats)
+library(tidyverse)
+library(viridis)
+```
+
+## Source script with functions
+
+```{r}
+source("bin/utils.R")
+```
+
+## Load data
+
+```{r}
+richter_sub_l <- readRDS("results/R_objects/richter_list_cxcr4.rds")
+```
+
+# Exploratory
+
+```{r}
+# Plot PC1 as a proxy of pseudotime
+purrr::map(richter_sub_l, DimPlot, reduction = "pca")
+pc1_pseudotime_gg <- purrr::map(
+  richter_sub_l,
+  FeaturePlot,
+  reduction = "pca",
+  features = "CXCR4",
+  cols = viridis(10),
+  pt.size = 3
+)
+pc1_pseudotime_gg <- purrr::map(pc1_pseudotime_gg, function(p) {
+  p +
+    theme(plot.title = element_text(size = 20),
+          axis.title = element_text(size = 20),
+          axis.text = element_text(size = 16),
+          legend.text = element_text(size = 18))
+})
+pc1_pseudotime_arr <- ggarrange(
+  plotlist = pc1_pseudotime_gg,
+  nrow = 3,
+  ncol = 1,
+  common.legend = TRUE,
+  legend = "right"
+)
+ggsave(
+  filename = "results/plots/pc1_pseudotime.png",
+  plot = pc1_pseudotime_arr,
+  width = 22,
+  height = 14
+)
+
+# Plot loadings PC1
+loadings_gg <- purrr::map(richter_sub_l, VizDimLoadings, dims = 1)
+loadings_gg <- purrr::map(loadings_gg, function(p) {
+  p +
+    theme(plot.title = element_text(size = 20),
+          axis.title = element_text(size = 20),
+          axis.text = element_text(size = 22),
+          legend.text = element_text(size = 18))
+})
+loadings_arr <- ggarrange(
+  plotlist = loadings_gg,
+  nrow = 1,
+  ncol = 3
+)
+ggsave(
+  filename = "results/plots/loadings_pc1.png",
+  plot = loadings_arr,
+  width = 22,
+  height = 10
+)
+###
+mat_l <- purrr::map(richter_sub_l, ~.x[["RNA"]]@scale.data)
+
+# Sort cells by PC
+mat_l <- purrr::map(names(richter_sub_l), function(x) {
+  direction <- if (x == "ICGC_012") TRUE else FALSE
+  ord <- order(
+    richter_sub_l[[x]]@reductions$pca@cell.embeddings[, "PC_1"], 
+    decreasing = direction
+  )
+  mat_l[[x]][, ord]
+})
+names(mat_l) <- names(richter_sub_l)
+
+# Subset to interesting features
+features_interest <- purrr::map2(richter_sub_l, names(richter_sub_l), function(seurat, x) {
+  if (x ==  "ICGC_012") {
+    loadings <- seurat@reductions$pca@feature.loadings[, "PC_1"]
+    loadings_up <- sort(loadings[loadings > 0], decreasing = TRUE)
+    loadings_down <- sort(loadings[loadings < 0], decreasing = FALSE)
+    feat <- list(
+      up = names(loadings_up)[1:25],
+      down = names(loadings_down)[1:25]
+    )
+    feat
+  } else{
+    loadings <- seurat@reductions$pca@feature.loadings[, "PC_1"]
+    loadings_up <- sort(loadings[loadings < 0], decreasing = FALSE)
+    loadings_down <- sort(loadings[loadings > 0], decreasing = TRUE)
+    feat <- list(
+      up = names(loadings_up)[1:25],
+      down = names(loadings_down)[1:25]
+    )
+    feat
+  }
+})
+mat_l <- purrr::map2(mat_l, features_interest, function(mat, feat) {
+  mat <- mat[unlist(feat), ]
+  colnames(mat) <- NULL
+  mat
+})
+
+# Plot heatmap
+heatmaps_l <- purrr::map(mat_l, function(mat) {
+  pheatmap(
+    mat, 
+    cluster_rows = TRUE,
+    cluster_cols = FALSE,
+    color = viridis(5)
+  )
+})
+
+# Let us find the overlapping between genes
+features_interest_inters_up <- Reduce(
+  intersect,
+  map(features_interest, "up")
+)
+features_interest_inters_down <- Reduce(
+  intersect,
+  map(features_interest, "down")
+)
+```
+
+Genes to focus: CXCR4, AC007952.4, TXNIP, CD24, CD69, CTLA4
+
+Interestingly, CXCR3 follows an opposite direction than CXCR4:
+
+```{r}
+FeaturePlot(
+  richter_sub_l$ICGC_012,
+  features = c("CXCR4", "TXNIP", "CD24", "AC007952.4", "CTLA4")
+)
+```
+

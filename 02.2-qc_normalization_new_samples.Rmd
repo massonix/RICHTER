@@ -26,7 +26,7 @@ min_total_cells <- 9
 
 # Introduction
 
-The objective of this notebook is to filter-out poor-quality cells and lowly expressed and normalize UMI of the new samples we sequenced. Briefly, we profiled the single-cell transcriptomes of the clinical time-points that had fewer cells, so that our conclusions are more robust. This time we did not use cell hashing, so we will read the expression matrices directly.
+The objective of this notebook is to filter-out poor-quality cells and lowly expressed and normalize UMI of the new samples we sequenced. In our previous analysis, we realized that we had very few cells in some of the clinical time-points. Thus, we profiled the single-cell transcriptomes of more cells from these samples. This time we did not use cell hashing, so we will read the expression matrices directly.
 
 
 # Pre-processing
@@ -51,7 +51,6 @@ source("bin/utils.R")
 
 ## Load data
 
-We load the demuliplexed `Seurat` object:
 
 ```{r}
 # Load and process matrices
@@ -81,7 +80,7 @@ expression_matrix <- Reduce(Matrix::cbind2, expression_matrices)
 
 # Load and process metadata
 metadata <- read_excel(
-  "data/BCLLATLAS_10/BCLLATLAS_10_ids.xlsx",
+  "data/BCLLATLAS_10/BCLLATLAS_10_ids-Richter Syndrom.xlsx",
   col_names = TRUE
 )
 ```
@@ -91,39 +90,51 @@ Now we can create the Seurat object and add the metadata
 
 ```{r}
 richter <- CreateSeuratObject(expression_matrix)
-richter$sample <- colnames(richter) %>%
+richter$orig.ident <- NULL
+str(richter@meta.data)
+```
+
+Let us load the previously analyzed Seurat object so we can homogenize the metadata:
+
+```{r}
+richter_old <- readRDS("/Volumes/Massoni_external/B_cell_atlas/RICHTER/current/results/R_objects/richter_seurat_filtered_normalized.rds")
+str(richter_old@meta.data)
+```
+
+
+```{r}
+richter$library <- colnames(richter) %>%
   str_split(pattern = "__") %>%
   purrr::map_chr(1)
-richter$id <- case_when(
-  richter$sample == "00_30" ~ "ICGC_012_00_30",
-  richter$sample == "04-67" ~ "ICGC_019_04_67",
-  richter$sample == "05_662" ~ "ICGC_012_05_662",
-  richter$sample == "15-194" ~ "ICGC_365_15_194",
-  richter$sample == "365_07" ~ "ICGC_365_365_07"
-)
-richter$description <- case_when(
-  richter$sample == "00_30" ~ "dx",
-  richter$sample == "04-67" ~ "diagnosis_sp",
-  richter$sample == "05_662" ~ "progression",
-  richter$sample == "15-194" ~ "richter_post-ofatu-duvelisib",
-  richter$sample == "365_07" ~ "relapse1_post-R-Brenda"
-)
-richter$source <- case_when(
-  richter$sample == "00_30" ~ "NA",
-  richter$sample == "04-67" ~ "PB",
-  richter$sample == "05_662" ~ "PB",
-  richter$sample == "15-194" ~ "LN",
-  richter$sample == "365_07" ~ "PB"
+richter$status <- case_when(
+  richter$library == "00_30" ~ "dx",
+  richter$library == "04-67" ~ "diagnosis_sp",
+  richter$library == "05_662" ~ "progression",
+  richter$library == "15-194" ~ "richter_post-ofatu-duvelisib",
+  richter$library == "365_07" ~ "relapse1_post-R-Brenda"
 )
 richter$patient_id <- case_when(
-  richter$sample == "00_30" ~ "ICGC_012",
-  richter$sample == "04-67" ~ "ICGC_019",
-  richter$sample == "05_662" ~ "ICGC_012",
-  richter$sample == "15-194" ~ "ICGC_365",
-  richter$sample == "365_07" ~ "ICGC_365"
+  richter$library == "00_30" ~ "ICGC_012",
+  richter$library == "04-67" ~ "ICGC_019",
+  richter$library == "05_662" ~ "ICGC_012",
+  richter$library == "15-194" ~ "ICGC_365",
+  richter$library == "365_07" ~ "ICGC_365"
 )
-
-richter
+richter$batch <- "3"
+richter$source <- case_when(
+  richter$library == "00_30" ~ "NA",
+  richter$library == "04-67" ~ "PB",
+  richter$library == "05_662" ~ "PB",
+  richter$library == "15-194" ~ "LN",
+  richter$library == "365_07" ~ "PB"
+)
+richter$sampling_time <- case_when(
+  richter$library == "00_30" ~ "6H",
+  richter$library == "04-67" ~ "5H",
+  richter$library == "05_662" ~ "6H",
+  richter$library == "15-194" ~ "4H",
+  richter$library == "365_07" ~ "7H"
+)
 ```
 
 
@@ -140,7 +151,7 @@ There are 3 essential quality control metrics that will determine if we include 
 The only metric missing is the mt expression:
 
 ```{r}
-richter[["percent_mt"]] <- PercentageFeatureSet(richter, pattern = "^MT-")
+richter$percent_mt <- PercentageFeatureSet(richter, pattern = "^MT-")
 ```
 
 ## Joint distribution

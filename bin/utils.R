@@ -756,3 +756,22 @@ run_clusterProfiler <- function(target, universe, ontology) {
   go
 }
 
+
+process_seurat <- function(seurat, ndims) {
+  seurat <- seurat %>%
+    FindVariableFeatures() %>%
+    ScaleData() %>%
+    RunPCA() %>%
+    RunUMAP(dims = 1:ndims, reduction = "pca")
+  seurat
+}
+
+process_seurat_harmony <- function(seurat, ndims_pca, ndims_harmony, group_var) {
+  seurat <- seurat %>%
+    FindVariableFeatures() %>%
+    ScaleData() %>%
+    RunPCA() %>%
+    RunHarmony(dims = 1:ndims_pca, reduction = "pca", group.by.vars = group_var) %>%
+    RunUMAP(dims = 1:ndims_harmony, reduction = "harmony")
+  seurat
+}

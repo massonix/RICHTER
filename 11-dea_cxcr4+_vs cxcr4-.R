@@ -4,6 +4,7 @@ library(AnnotationDbi)
 library(Seurat)
 library(viridis)
 library(VennDiagram)
+library(ggrepel)
 
 richter_l <- readRDS("/Volumes/Massoni_external/B_cell_atlas/RICHTER/current/results/R_objects/richter_seurat_patients_list_clustered.rds")
 richter_l <- richter_l[c("ICGC_012", "ICGC_019", "ICGC_3299")]
@@ -20,16 +21,18 @@ richter_l <- purrr::map(richter_l, function(seurat) {
     ScaleData() %>% 
     RunPCA()
 })
-cxcr4_expression <- purrr::map(richter_l, function(seurat) {
+cxcr4_expression <- purrr::map2(richter_l, names(richter_l), function(seurat, title) {
   cxcr4 <- as.vector(seurat[["RNA"]]@data["CXCR4", ])
   cxcr4 <- data.frame(cxcr4 = cxcr4)
   ggplot(cxcr4, aes(cxcr4)) +
     geom_histogram() +
     geom_vline(xintercept = 1.5, color = "darkblue", linetype = "dashed") +
     geom_vline(xintercept = 3.5, color = "darkblue", linetype = "dashed") +
-    labs(x = "CXCR4 expression") +
-    theme_classic()
+    labs(title = title, x = "CXCR4 expression") +
+    theme_classic() +
+    theme(plot.title = element_text(size = 13, hjust = 0.5))
 })
+ggpubr::ggarrange(plotlist = cxcr4_expression, ncol = 3)
 richter_l <- purrr::map(richter_l, function(seurat) {
   cxcr4 <- as.vector(seurat[["RNA"]]@data["CXCR4", ])
   cxcr4_status <- case_when(
@@ -42,16 +45,18 @@ richter_l <- purrr::map(richter_l, function(seurat) {
   seurat <- subset(seurat, subset = cxcr4_status %in% c("low", "high"))
   seurat
 })
-cxcr4_expression2 <- purrr::map(richter_l, function(seurat) {
+cxcr4_expression2 <- purrr::map2(richter_l, names(richter_l), function(seurat, title) {
   cxcr4 <- as.vector(seurat[["RNA"]]@data["CXCR4", ])
   cxcr4 <- data.frame(cxcr4 = cxcr4)
   ggplot(cxcr4, aes(cxcr4)) +
     geom_histogram(bins = 100) +
     geom_vline(xintercept = 1.5, color = "darkblue", linetype = "dashed") +
     geom_vline(xintercept = 3.5, color = "darkblue", linetype = "dashed") +
-    labs(x = "CXCR4 expression") +
-    theme_classic()
+    labs(title = title, x = "CXCR4 expression") +
+    theme_classic() +
+    theme(plot.title = element_text(size = 13, hjust = 0.5))
 })
+ggpubr::ggarrange(plotlist = cxcr4_expression2, ncol = 3)
 dea_cxcr4_status <- purrr::map(richter_l, function(seurat) {
   Idents(seurat) <- "cxcr4_status"
   df <- FindMarkers(
@@ -63,16 +68,120 @@ dea_cxcr4_status <- purrr::map(richter_l, function(seurat) {
   df
 })
 
+volcano_plots <- purrr::map2(dea_cxcr4_status, names(dea_cxcr4_status), function(df, title) {
+  df <- df %>%
+    rownames_to_column(var = "gene") %>% 
+    dplyr::mutate(
+      log_10_adj_p = -1 * log10(p_val_adj),
+      significance = ifelse(p_val_adj < 0.001, TRUE, FALSE)
+    )
+  subset_df <- df %>%
+    filter(abs(avg_logFC) > 0.5, significance == TRUE)
+  p <- df %>% 
+    ggplot(aes(avg_logFC, log_10_adj_p, color = significance)) +
+      geom_point() +
+      geom_text_repel(data = subset_df, aes(label = gene), color = "black", size = 3) +
+      scale_color_manual("significance", values = c("darkgrey", "green")) +
+      labs(
+        title = title,
+        x = "log (CXCR4+ / CXCR4-)",
+        y = "-log10 adjusted p-value"
+      ) +
+      theme_classic() +
+      theme(plot.title = element_text(size = 13, hjust = 0.5))
+  p
+})    
+ggpubr::ggarrange(plotlist = volcano_plots, ncol = 3)
+
+
+
 up_in_high_cxcr4 <- purrr::map(dea_cxcr4_status, ~ rownames(.x)[.x$avg_logFC > 0])
 down_in_high_cxcr4 <- purrr::map(dea_cxcr4_status, ~ rownames(.x)[.x$avg_logFC < 0])
 
-vd_high <- VennDiagram::venn.diagram(up_in_high_cxcr4, filename = NULL)
+vd_high <- VennDiagram::venn.diagram(up_in_high_cxcr4, filename = NULL, fill = 2:4)
 grid.draw(vd_high)
 
+Reduce(intersect, up_in_high_cxcr4)
 
-vd_low <- VennDiagram::venn.diagram(down_in_high_cxcr4, filename = NULL)
+
+# GO
+library(org.Hs.eg.db)
+up_in_high_cxcr4_inters <- Reduce(intersect, up_in_high_cxcr4[c("ICGC_012", "ICGC_019")])
+target_entrez <- AnnotationDbi::select(
+  x = org.Hs.eg.db, 
+  keys = up_in_high_cxcr4_inters, 
+  keytype = "SYMBOL",
+  columns = "ENTREZID"
+)$ENTREZID
+target_entrez <- target_entrez[!is.na(target_entrez)]
+target_entrez
+
+universe_entrez <- AnnotationDbi::select(
+  x = org.Hs.eg.db, 
+  keys = rownames(richter_l$ICGC_012), 
+  keytype = "SYMBOL",
+  columns = "ENTREZID"
+)$ENTREZID
+universe_entrez <- universe_entrez[!is.na(universe_entrez)]
+universe_entrez
+library(GOstats)
+params <- new("GOHyperGParams", geneIds = target_entrez, 
+              universeGeneIds = universe_entrez, annotation = "org.Hs.eg.db",
+              ontology = "BP", pvalueCutoff = 1, 
+              conditional = TRUE, testDirection = "over")
+hgOver_gt <- hyperGTest(params)
+go_results <- summary(hgOver_gt)
+
+selection <- go_results$Size >= 3 & go_results$Size <= 600 & go_results$Count >= 4 & go_results$OddsRatio > 3 & go_results$Pvalue < 0.05
+go_results_filt <- go_results[selection, ]
+go_results_filt_gg <- go_results_filt %>% 
+  ggplot(aes(fct_reorder(Term, OddsRatio), OddsRatio)) +
+  geom_col() +
+  labs(x = "", y = "Odds Ratio") +
+  theme_classic() +
+  coord_flip()
+
+go_lst <- mapIds(org.Hs.eg.db, go_results_filt$GOBPID, "ENTREZID", "GOALL", multiVals = "list")
+go_lst <- purrr::map(go_lst, function(x) x[x %in% target_entrez])
+go_lst_symb <- purrr::map_chr(go_lst, function(x) {
+  symbs <- mapIds(org.Hs.eg.db, keys = x, keytype = "ENTREZID", column = "SYMBOL")
+  names(symbs) <- NULL
+  symbs <- unique(symbs)
+  symbs <- str_c(symbs, collapse = "/")
+  symbs
+})
+go_lst_symb <- go_lst_symb[go_results_filt$GOBPID]
+go_lst_df <- data.frame(
+  term = go_results_filt$Term, 
+  enriched_genes = go_lst_symb
+)
+write_tsv(go_lst_df, path = "/Volumes/Massoni_external/B_cell_atlas/RICHTER/current/results/tables/gene_ontology_cxcr4_hi_vs_low.tsv", col_names = TRUE, quote_escape = FALSE)
+
+
+
+# CIRBP
+seurat <- richter_l$ICGC_012
+title <- "ICGC_012"
+cirbp_l <- purrr::map2(richter_l, names(richter_l), function(seurat, title) {
+  p <- VlnPlot(seurat, features = "CIRBP", group.by = "cxcr4_status")
+  p +
+    scale_x_discrete("", labels = c("CXCR4 low", "CXCR4 high")) +
+    labs(y = "CIRBP Expression Level", title = title) +
+    theme(legend.position = "none")
+})
+ggpubr::ggarrange(plotlist = cirbp_l, ncol = 3)
+
+
+# Save excel files
+dea_cxcr4_status <- purrr::map(dea_cxcr4_status, rownames_to_column, var = "gene")
+openxlsx::write.xlsx(dea_cxcr4_status, file = "/Volumes/Massoni_external/B_cell_atlas/RICHTER/current/results/tables/differential_expression_cxcr4_hi_vs_low.xlsx")
+
+
+vd_low <- VennDiagram::venn.diagram(down_in_high_cxcr4, filename = NULL, fill = 2:4)
 grid.draw(vd_low)
-####
+Reduce(intersect, down_in_high_cxcr4)
+
+
 
 
 

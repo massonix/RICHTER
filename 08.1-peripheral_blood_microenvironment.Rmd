@@ -1,0 +1,252 @@
+---
+title: "Tumor Microenvironment"
+author: "Ramon Massoni-Badosa"
+date: "04/09/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introduction
+
+The objective of this notebook is to compare the composition and expression non-B cell peripheral blood cells between healthy, CLL and Richter samples.
+
+
+# Pre-processing
+
+## Load packages
+
+```{r}
+library(Seurat)
+library(harmony)
+library(SeuratWrappers)
+library(tidyverse)
+```
+
+
+## Load data
+
+```{r}
+microenv_richter <- readRDS("/Volumes/Massoni_external/B_cell_atlas/RICHTER/current/results/R_objects/peripheral_blood_microenvironment_richter_seurat.rds")
+microenv_cll_benchmark <- readRDS("/Volumes/Massoni_external/B_cell_atlas/JULIA/current/2-CLL/results/R_objects/cll_seurat_annotated.rds")
+microenv_pbmc_benchmark <- readRDS("/Volumes/Massoni_external/B_cell_atlas/JULIA/current/1-PBMC/results/R_objects/10X_pbmc_Seurat_clustered.RDS")
+```
+
+
+## Source script with function definition
+
+```{r}
+source("bin/utils.R")
+```
+
+
+# Compositional analysis
+
+```{r}
+# Subset to good-quality cells (sampling time <= 2h or 4ºC)
+Idents(microenv_pbmc_benchmark) <- "condition"
+conditions_interest <- c("0h", "2h", "8h", "24h_4C", "48h_4C")
+microenv_pbmc_benchmark <- subset(
+  microenv_pbmc_benchmark,
+  idents = conditions_interest
+)
+table(microenv_pbmc_benchmark$condition)
+cll_selection <- microenv_cll_benchmark$temperature == "4C" | microenv_cll_benchmark$time %in% c("0h", "2h")
+cells_cll <- colnames(microenv_cll_benchmark)[cll_selection]
+microenv_cll_benchmark <- subset(microenv_cll_benchmark,cells = cells_cll)
+table(microenv_cll_benchmark$temperature, microenv_cll_benchmark$time)
+
+
+# Subset to peripheral blood cells and exclude B-cell lineage
+Idents(microenv_pbmc_benchmark) <- "cell_type"
+microenv_pbmc_benchmark <- subset(
+  microenv_pbmc_benchmark,
+  idents = c("T", "NK", "Monocyte")
+)
+Idents(microenv_cll_benchmark) <- "cell_type"
+microenv_cll_benchmark <- subset(
+  microenv_cll_benchmark,
+  idents = c("T and NK", "Monocyte")
+)
+
+
+# Homogenize metadata and merge objects
+str(microenv_pbmc_benchmark@meta.data)
+str(microenv_cll_benchmark@meta.data)
+str(microenv_richter@meta.data)
+selected_cols_pbmc <- c("nCount_RNA", "nFeature_RNA", "donor", "cell_type")
+microenv_pbmc_benchmark@meta.data <- microenv_pbmc_benchmark@meta.data[, selected_cols_pbmc]
+new_colnames <- c("nCount_RNA", "nFeature_RNA", "donor", "original_annotation")
+colnames(microenv_pbmc_benchmark@meta.data) <- new_colnames
+microenv_cll_benchmark@meta.data <- microenv_cll_benchmark@meta.data[, selected_cols_pbmc]
+colnames(microenv_cll_benchmark@meta.data) <- new_colnames
+selected_cols_richter <- c("nCount_RNA", "nFeature_RNA", "patient_id", "cell_type", "is_richter")
+microenv_richter@meta.data <- microenv_richter@meta.data[, selected_cols_richter]
+new_colnames <- c("nCount_RNA", "nFeature_RNA", "donor", "original_annotation", "status")
+colnames(microenv_richter@meta.data) <- new_colnames
+microenv_pbmc_benchmark$status <- "healthy"
+microenv_cll_benchmark$status <- "cll"
+microenv_richter$status <- ifelse(microenv_richter$status == "richter", "richter", "cll")
+microenv <- merge(
+  microenv_pbmc_benchmark,
+  c(microenv_cll_benchmark, microenv_richter)
+)
+```
+
+Let us annotate the merged Seurat object:
+
+```{r}
+microenv <- NormalizeData(
+  microenv,
+  normalization.method = "LogNormalize",
+  scale.factor = 1e4
+)
+microenv <- process_seurat_harmony(
+  microenv,
+  ndims_pca = 30,
+  group_var = "donor", 
+  ndims_harmony = 30
+)
+DimPlot(microenv, group.by = "status")
+
+
+# Cluster
+microenv <- FindNeighbors(microenv, reduction = "harmony", dims = 1:30)
+microenv <- FindClusters(microenv, resolution = 0.4)
+DimPlot(microenv)
+
+
+# Markers 
+markers_microenv <- FindAllMarkers(
+  microenv, 
+  only.pos = TRUE,
+  test.use = "wilcox",
+  verbose = TRUE,
+  logfc.threshold = 0.5
+)
+markers_microenv <- markers_microenv %>%
+  filter(p_val_adj < 1e-5) %>%
+  arrange(cluster, desc(avg_logFC))
+DT::datatable(markers_microenv)
+```
+
+| Cluster ID  | Markers    | Cell type              |   
+|-------------|------------|------------------------|
+| 0           | CD8A, CD8B | CD8+ T                 |
+| 1           | GNLY, TRDC | NK/TRDC+ T             |
+| 2           | IL7R, IL32 | Memory CD4+ T          |
+| 3           | IL7R, CCR7 | Naive CD4+ T           |
+| 4           | LYZ        | CD14+ Mono             |
+| 5           | MT genes   | poor-quality           |
+| 6           | NR4A2, CD8A| Exhausted CD8+ T       |
+| 7           | MS4A7      | FCGR3A+ Mono           |
+| 8           | CTLA4      | CTLA4+ CD4+ T          |
+| 9           | IGHM       | doublets/misclassified |
+| 10          | CD79A      | B                      |
+| 11          | PPBP       | Platelet               |
+| 12          | HBM        | Erythro                |
+| 13          | FCER1A     | DC                     |
+
+
+```{r}
+microenv$new_annotation <- microenv$seurat_clusters
+annotation_levels <- c("CD8+ T", "NK/TRDC+ T", "Memory CD4+ T", "Naive CD4+ T",
+                       "CD14+ Mono", "poor-quality", "Exhausted CD8+ T",
+                       "FCGR3A+ Mono", "CTLA4+ CD4+ T", "doublets/misclassified",
+                       "B", "Platelet", "Erythro", "DC")
+levels(microenv$new_annotation) <- annotation_levels
+
+
+# Subset to eliminate poor-quality cells or cells too infrequent to establish conclusions
+Idents(microenv) <- "new_annotation"
+selected_types <- c("CD8+ T", "NK/TRDC+ T", "Memory CD4+ T", "Naive CD4+ T",
+                    "CD14+ Mono", "Exhausted CD8+ T", "FCGR3A+ Mono",
+                    "CTLA4+ CD4+ T")
+microenv <- subset(microenv, idents = selected_types)
+```
+
+We noticed that there is one cluster that has NK markers and the expression of TCR delta (TCRD). Thus, this cluster can be further subdivided into two:
+
+```{r}
+FeaturePlot(microenv, c("GNLY", "TRDC"))
+nk_tcrd <- subset(microenv, idents = "NK/TRDC+ T")
+nk_tcrd <- process_seurat_harmony(
+  nk_tcrd,
+  ndims_pca = 30,
+  group_var = "donor",
+  ndims_harmony = 30
+)
+nk_tcrd <- FindNeighbors(nk_tcrd, reduction = "harmony", dims = 1:30)
+nk_tcrd <- FindClusters(nk_tcrd, resolution = 0.2)
+DimPlot(nk_tcrd)
+markers_nk_tcrd <- FindAllMarkers(
+  nk_tcrd, 
+  only.pos = TRUE,
+  test.use = "wilcox",
+  verbose = TRUE,
+  logfc.threshold = 0.3
+)
+markers_nk_tcrd <- markers_nk_tcrd %>%
+  filter(p_val_adj < 1e-5) %>%
+  arrange(cluster, desc(avg_logFC))
+DT::datatable(markers_nk_tcrd)
+```
+
+| Cluster ID  | Markers     | Cell type             |   
+|-------------|-------------|-----------------------|
+| 0           | PFN1, KLRF1 | NK                    |
+| 1           | TRDC        | TRDC+ T               |
+| 2           | CIRBP, RBM3 | cold-shocked          |
+| 3           | IL7R, LTB   | Misclassified         |  
+
+
+```{r}
+nk_cells <- colnames(nk_tcrd)[nk_tcrd$seurat_clusters == "0"]
+trdc_cells <- colnames(nk_tcrd)[nk_tcrd$seurat_clusters == "1"]
+microenv$new_annotation <- as.character(microenv$new_annotation)
+microenv$new_annotation[colnames(microenv) %in% nk_cells] <- "NK"
+microenv$new_annotation[colnames(microenv) %in% trdc_cells] <- "TRDC+ T"
+Idents(microenv) <- "new_annotation"
+selected_cells <- colnames(microenv)[microenv$new_annotation != "NK/TRDC+ T"]
+microenv <- subset(microenv, cells = selected_cells)
+
+# Reprocess
+microenv <- process_seurat_harmony(
+  microenv,
+  ndims_pca = 30,
+  group_var = "donor",
+  ndims_harmony = 30
+)
+FeaturePlot(microenv, c("GNLY", "TRDC"))
+DimPlot(microenv, label = TRUE) + NoLegend()
+```
+
+Finally, we can plot the stacked bar plot
+
+```{r}
+stacked_bar_df <- microenv@meta.data %>%
+  group_by(new_annotation, status) %>%
+  summarise(n_cells = n())
+stacked_bar_df <- stacked_bar_df %>%
+  group_by(status) %>%
+  mutate(n_cells_total = sum(n_cells)) %>%
+  ungroup() %>%
+  mutate(pct_cells = n_cells / n_cells_total * 100)
+stacked_bar_gg <- stacked_bar_df %>%
+  ggplot(aes(status, pct_cells, fill = new_annotation)) +
+    geom_col() +
+    labs(x = "", y = "Percentage of Cells (%)", fill = "") +
+    theme_classic() +
+    theme(axis.title.y = element_text(size = 13)) +
+    theme(axis.text.x = element_text(size = 11))
+```
+
+
+# Differential Expression Analysis
+
+```{r}
+
+```
+
